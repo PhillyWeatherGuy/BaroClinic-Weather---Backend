@@ -1,0 +1,80 @@
+name: Generate Weather Maps
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+# Grant permissions required for force-pushing and publishing directly to GitHub Pages
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-plot:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Fetch complete history for safe branch resetting
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install Linux System Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libproj-dev proj-bin libgeos-dev libeccodes-dev libeccodes-tools
+
+    - name: Install Python Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy xarray matplotlib cartopy pandas scipy cfgrib pillow ecmwf-opendata
+
+    - name: Run Weather Map Generator
+      run: |
+        python process.py
+
+    - name: Flatten History and Force Push (1GB Protection Limit)
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+        # Stage ALL changes (-A) including map spritesheets and config.py adjustments
+        git add -A
+        
+        # Check if there are actual changes before flattening
+        if ! git diff-index --quiet HEAD; then
+          echo "🔄 New changes detected. Flattening branch history to save space..."
+          
+          # Create a temporary orphan branch containing only the current state
+          git checkout --orphan temp-branch
+          git commit -m "🎨 Sync vertical weather spritesheets [Clean History]"
+          
+          # Force overwrite the main branch with the flattened state
+          git branch -M temp-branch main
+          git push origin main --force
+        else
+          echo "✅ No new changes detected. Skipping history push."
+        fi
+
+    - name: Upload Artifact for GitHub Pages
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: '.' # Serves your repository root directory directly to Pages
+
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4

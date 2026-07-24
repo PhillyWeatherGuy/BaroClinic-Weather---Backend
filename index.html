@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BaroClinic | Weather Workspace Platform</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        /* Base Reset & Premium Dark Theme Styles */
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        body { background-color: #0b0e17; color: #f3f4f6; padding: 12px; display: flex; flex-direction: column; align-items: center; min-height: 100vh; overflow-x: hidden; }
+        
+        .page-container { width: 100%; max-width: 700px; display: none; flex-direction: column; gap: 16px; }
+        .page-container.active { display: flex; }
+
+        /* Premium Brand Headers */
+        header { display: flex; justify-content: space-between; align-items: center; padding: 2px 4px; }
+        .logo { font-size: 19px; font-weight: 900; letter-spacing: -0.5px; background: linear-gradient(135deg, #3b82f6, #60a5fa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .engine-badge { font-size: 11px; color: #4b5563; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+
+        /* Homepage Component Styles */
+        .welcome-card {
+            background: linear-gradient(135deg, #1e293b 0%, #121824 100%);
+            border: 1px solid #1e293b;
+            border-radius: 16px;
+            padding: 24px 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+        }
+        .welcome-card h1 { font-size: 24px; font-weight: 800; color: #ffffff; margin-bottom: 6px; letter-spacing: -0.5px; }
+        .welcome-card p { font-size: 13px; color: #9ca3af; line-height: 1.5; }
+
+        /* Tactical Terminal Hub Grid */
+        .launch-grid { display: flex; flex-direction: column; gap: 10px; }
+        
+        .launch-panel {
+            background: #121824;
+            border: 1px solid #1e293b;
+            border-radius: 14px;
+            padding: 18px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s, transform 0.1s;
+        }
+        .launch-panel:hover { border-color: #3b82f6; background: #161f30; }
+        .launch-panel:active { transform: scale(0.99); }
+        
+        .launch-left { display: flex; align-items: center; gap: 16px; }
+        .panel-icon-frame {
+            background: rgba(59, 130, 246, 0.08);
+            border: 1px solid rgba(59, 130, 246, 0.15);
+            color: #3b82f6;
+            width: 42px; height: 42px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+        .panel-icon-frame.green { color: #10b981; background: rgba(16, 185, 129, 0.08); border-color: rgba(16, 185, 129, 0.15); }
+        .panel-icon-frame.purple { color: #a855f7; background: rgba(168, 85, 247, 0.08); border-color: rgba(168, 85, 247, 0.15); }
+        .panel-icon-frame.cyan { color: #06b6d4; background: rgba(6, 182, 212, 0.08); border-color: rgba(6, 182, 212, 0.15); }
+
+        .launch-meta h3 { font-size: 15px; font-weight: 700; color: #ffffff; margin-bottom: 3px; }
+        .launch-meta p { font-size: 12px; color: #6b7280; }
+        .launch-chevron { color: #4b5563; font-size: 14px; transition: color 0.2s; }
+        .launch-panel:hover .launch-chevron { color: #3b82f6; }
+
+        /* Meta Tracker Bar */
+        .system-meta-footer {
+            display: flex;
+            justify-content: space-between;
+            background: #0a0d14;
+            border: 1px solid #1e293b;
+            border-radius: 10px;
+            padding: 10px 14px;
+            font-size: 11px;
+            color: #4b5563;
+            font-weight: 700;
+        }
+        .meta-value-span { color: #9ca3af; font-family: monospace; }
+
+        /* Navigation Strips */
+        .nav-back-strip { display: flex; align-items: center; padding: 4px 0; margin-bottom: -4px; }
+        .back-btn { background: #121824; border: 1px solid #1e293b; color: #9ca3af; font-size: 11px; font-weight: 700; text-transform: uppercase; padding: 8px 14px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: color 0.1s; }
+        .back-btn:hover { color: #ffffff; border-color: #3b82f6; }
+
+        .model-layout-stack { display: flex; flex-direction: column; gap: 10px; }
+
+        .tab-row { display: flex; overflow-x: auto; gap: 5px; background: #121824; padding: 5px; border-radius: 10px; border: 1px solid #1e293b; scrollbar-width: none; }
+        .tab-row::-webkit-scrollbar { display: none; }
+        
+        .tab-btn { background: transparent; border: none; color: #9ca3af; padding: 8px 14px; font-size: 11px; font-weight: 700; border-radius: 6px; cursor: pointer; white-space: nowrap; transition: all 0.1s ease; text-transform: uppercase; }
+        .tab-btn.active { background: #1e293b; color: #3b82f6; border: 1px solid rgba(59, 130, 246, 0.25); }
+        .tab-btn.disabled { opacity: 0.2; cursor: not-allowed; font-weight: 500; }
+
+        /* Map Canvas Stage with Fullscreen Capability */
+        .viewport-wrapper { position: relative; width: 100%; background: #04060a; border: 1px solid #1e293b; border-radius: 14px; overflow: hidden; box-shadow: 0 20px 40px rgba(0,0,0,0.6); transition: all 0.3s ease; }
+        #mapCanvas { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+
+        /* Transparent Forecast HUD Box */
+        .forecast-time-hud {
+            position: absolute;
+            top: 12px;
+            right: 12px;
+            background: rgba(30, 41, 59, 0.7);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: 600;
+            color: #ffffff;
+            backdrop-filter: blur(4px);
+            pointer-events: none;
+            z-index: 100;
+            letter-spacing: 0.02em;
+        }
+
+        /* Full Screen States */
+        .viewport-wrapper.fullscreen-mode {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            width: 100vw; height: 100vh;
+            z-index: 5000;
+            border-radius: 0;
+            border: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000000;
+        }
+        .viewport-wrapper.fullscreen-mode #mapCanvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .fs-hud-status {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(18, 24, 36, 0.85);
+            border: 1px solid #1e293b;
+            padding: 8px 18px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 700;
+            color: #3b82f6;
+            letter-spacing: 0.05em;
+            backdrop-filter: blur(8px);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+            z-index: 5020;
+        }
+        .fs-hud-status.visible { opacity: 1; }
+
+        .map-action-btn {
+            position: absolute;
+            bottom: 14px; right: 14px;
+            background: rgba(18, 24, 36, 0.85);
+            border: 1px solid #1e293b;
+            color: #ffffff;
+            width: 42px; height: 42px;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            backdrop-filter: blur(4px);
+            z-index: 5010;
+            transition: background 0.2s;
+        }
+        .map-action-btn:hover { background: #1e293b; }
+        
+        .viewport-wrapper.fullscreen-mode .map-action-btn { top: auto; bottom: 14px; right: 14px; }
+        .viewport-wrapper.fullscreen-mode .forecast-time-hud { top: 20px; right: 20px; }
+
+        /* Category Nav Strip Layouts */
+        .tt-category-nav { 
+            display: flex; 
+            width: 100%; 
+            background: #1b3a9c; 
+            border-radius: 10px; 
+            overflow-x: auto; 
+            scrollbar-width: none; 
+            border: 1px solid #1d4ed8; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2); 
+        }
+        .tt-category-nav::-webkit-scrollbar { display: none; }
+        
+        .tt-cat-btn { 
+            flex: 1;
+            padding: 15px 4px; 
+            text-align: center; 
+            color: #bfdbfe; 
+            font-size: 11px; 
+            font-weight: 700; 
+            border: none; 
+            border-right: 1px solid #1d4ed8; 
+            background: transparent; 
+            cursor: pointer;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+        }
+        .tt-cat-btn:hover { background: #2563eb; color: white; }
+        .tt-cat-btn:last-child { border-right: none; }
+
+        @media (max-width: 560px) {
+            .tt-cat-btn { flex: 0 0 auto; padding: 15px 18px; }
+        }
+
+        /* Control Deck Panel */
+        .control-deck { background: #121824; border: 1px solid #1e293b; border-radius: 14px; padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+        .media-strip { display: flex; align-items: center; gap: 12px; }
+        .btn-group { display: flex; background: #0a0d14; border: 1px solid #1e293b; padding: 3px; border-radius: 10px; }
+        .action-icon { background: transparent; border: none; color: #9ca3af; width: 40px; height: 36px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+        .action-icon:hover { color: #ffffff; background: #121824; }
+
+        /* Custom Audio/Video Native Style Sliders */
+        .slider-wrapper { flex-grow: 1; display: flex; align-items: center; padding: 0 6px; position: relative; }
+        input[type="range"] { width: 100%; -webkit-appearance: none; appearance: none; background: transparent; height: 50px; outline: none; cursor: pointer; margin: 0; }
+        input[type="range"]::-webkit-slider-runnable-track { width: 100%; height: 10px; background: #0a0d14; border-radius: 5px; border: 1px solid #1e293b; }
+        input[type="range"]::-moz-range-track { width: 100%; height: 10px; background: #0a0d14; border-radius: 5px; border: 1px solid #1e293b; }
+        
+        input[type="range"]::-webkit-slider-thumb { 
+            -webkit-appearance: none; appearance: none; width: 26px; height: 26px; border-radius: 50%; background: #3b82f6; 
+            box-shadow: 0 0 14px rgba(59, 130, 246, 0.8), 0 2px 4px rgba(0,0,0,0.4); margin-top: -8px; border: 2px solid #ffffff;
+        }
+        input[type="range"]::-moz-range-thumb { 
+            width: 26px; height: 26px; border-radius: 50%; background: #3b82f6; 
+            box-shadow: 0 0 14px rgba(59, 130, 246, 0.8), 0 2px 4px rgba(0,0,0,0.4); border: 2px solid #ffffff;
+        }
+
+        .utility-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+        .util-btn { background: #1e293b; border: 1px solid rgba(255,255,255,0.03); color: #f3f4f6; padding: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px; }
+        .util-btn.accent { background: #2563eb; color: white; }
+
+        .metadata-bar { display: flex; justify-content: space-between; align-items: center; background: #0a0d14; padding: 12px 14px; border-radius: 8px; border: 1px solid #1e293b; font-size: 11px; }
+        .select-custom { background: transparent; border: none; color: #f3f4f6; font-weight: 700; outline: none; cursor: pointer; font-size: 11px; }
+        .val-step { font-family: monospace; font-weight: 700; color: #3b82f6; background: rgba(59,130,246,0.1); padding: 3px 8px; border-radius: 4px; }
+
+        .regions-drawer { display: none; background: #121824; border: 1px solid #1e293b; border-radius: 12px; padding: 12px; }
+        .regions-drawer.open { display: flex; flex-direction: column; gap: 8px; }
+        .grid-layout { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+        .grid-tile { background: #0a0d14; border: 1px solid #1e293b; padding: 12px 4px; font-size: 11px; font-weight: 600; text-align: center; border-radius: 6px; color: #9ca3af; cursor: pointer; }
+        .grid-tile.active { border-color: #3b82f6; color: #3b82f6; }
+
+        /* Full Screen Parameter Overlay System */
+        .parameter-zoom-page {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: #0b0e17; z-index: 6000;
+            display: flex; flex-direction: column; opacity: 0; transform: scale(0.94); pointer-events: none;
+            transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+        }
+        .parameter-zoom-page.active { opacity: 1; transform: scale(1); pointer-events: auto; }
+
+        .zoom-header { background: #121824; padding: 18px 16px; display: flex; align-items: center; border-bottom: 1px solid #1e293b; }
+        .zoom-back-btn { background: #1e293b; border: none; color: #f3f4f6; font-size: 12px; font-weight: 700; cursor: pointer; padding: 8px 14px; border-radius: 6px; display: flex; align-items: center; gap: 6px; }
+        .zoom-title { font-size: 14px; font-weight: 800; color: #ffffff; flex-grow: 1; text-align: center; margin-right: 60px; text-transform: uppercase; letter-spacing: 0.03em; }
+
+        .zoom-content { padding: 16px; overflow-y: auto; flex-grow: 1; }
+        .zoom-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding-bottom: 30px; }
+        
+        .zoom-item-btn { background: #121824; border: 1px solid #1e293b; padding: 18px 10px; font-size: 12px; font-weight: 700; color: #9ca3af; border-radius: 8px; cursor: pointer; text-align: center; }
+        .zoom-item-btn.selected { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: #ffffff; border-color: #3b82f6; }
+    </style>
+</head>
+<body>
+
+    <div class="page-container active" id="homepageView">
+        <header>
+            <div class="logo">BAROCLINIC</div>
+            <div class="engine-badge">CORE DASHBOARD</div>
+        </header>
+
+        <div class="welcome-card">
+            <h1 id="welcomeGreeting">Good Evening</h1>
+            <p>Select an operation desk module below to begin analyzing real-time meteorological loops and geographic datasets.</p>
+        </div>
+
+        <div class="launch-grid">
+            <div class="launch-panel" onclick="navigateToPage('modelViewerView')">
+                <div class="launch-left">
+                    <div class="panel-icon-frame"><i class="fa-solid fa-chart-line"></i></div>
+                    <div class="launch-meta">
+                        <h3>Model Viewer</h3>
+                        <p>Access layers, frame runs, and fluid dynamics arrays</p>
+                    </div>
+                </div>
+                <i class="fa-solid fa-chevron-right launch-chevron"></i>
+            </div>
+
+            <div class="launch-panel" onclick="alert('Initializing real-time observation feeds... Surface METAR data links currently offline.')">
+                <div class="launch-left">
+                    <div class="panel-icon-frame green"><i class="fa-solid fa-satellite-dish"></i></div>
+                    <div class="launch-meta">
+                        <h3>Observations</h3>
+                        <p>Live terminal radar, mesonet arrays, and satellite streams</p>
+                    </div>
+                </div>
+                <i class="fa-solid fa-chevron-right launch-chevron"></i>
+            </div>
+
+            <div class="launch-panel" onclick="alert('Accessing equation engine... custom formula parsing fields will load shortly.')">
+                <div class="launch-left">
+                    <div class="panel-icon-frame purple"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
+                    <div class="launch-meta">
+                        <h3>Parameter Creator</h3>
+                        <p>Compile custom thermodynamic indexes and scaling values</p>
+                    </div>
+                </div>
+                <i class="fa-solid fa-chevron-right launch-chevron"></i>
+            </div>
+
+            <div class="launch-panel" onclick="alert('Connecting to marine dataset buoy loops... Sea-surface data compiling.')">
+                <div class="launch-left">
+                    <div class="panel-icon-frame cyan"><i class="fa-solid fa-water"></i></div>
+                    <div class="launch-meta">
+                        <h3>Ocean Analysis</h3>
+                        <p>SST data tables, Gulf Stream velocities, and wave periods</p>
+                    </div>
+                </div>
+                <i class="fa-solid fa-chevron-right launch-chevron"></i>
+            </div>
+        </div>
+
+        <div class="system-meta-footer">
+            <span>STATION TIME: <span class="meta-value-span" id="homeTimeLabel">--:--</span></span>
+            <span>STATUS: <span class="meta-value-span" style="color: #10b981;">ONLINE</span></span>
+        </div>
+    </div>
+
+    <div class="page-container" id="modelViewerView">
+        <div class="nav-back-strip">
+            <button class="back-btn" onclick="navigateToPage('homepageView')">
+                <i class="fa-solid fa-chevron-left"></i> Home Dashboard
+            </button>
+        </div>
+
+        <div class="model-layout-stack">
+            <div class="tab-row">
+                <button class="tab-btn active">Global</button>
+                <button class="tab-btn disabled">Ensemble</button>
+                <button class="tab-btn disabled">Hurricane</button>
+                <button class="tab-btn disabled">Mesoscale</button>
+            </div>
+
+            <div class="tab-row">
+                <button class="tab-btn active">ECMWF HRES</button>
+                <button class="tab-btn disabled">GFS</button>
+                <button class="tab-btn disabled">HRRR</button>
+                <button class="tab-btn disabled">NAM</button>
+            </div>
+
+            <div class="viewport-wrapper" id="viewportWrapper">
+                <canvas id="mapCanvas"></canvas>
+                <div class="forecast-time-hud" id="forecastTimeHud">Calculating...</div>
+                <div class="fs-hud-status" id="fsHudStatus">F000</div>
+                <button class="map-action-btn" id="fullscreenToggleBtn" title="Toggle Fullscreen View">
+                    <i class="fa-solid fa-expand" id="fsIcon"></i>
+                </button>
+            </div>
+
+            <div class="tt-category-nav">
+                <button class="tt-cat-btn" onclick="openZoomPage('moisture')">Precip/Moisture</button>
+                <button class="tt-cat-btn" onclick="openZoomPage('lower-dyn')">Lower Dynamics</button>
+                <button class="tt-cat-btn" onclick="openZoomPage('upper-dyn')">Upper Dynamics</button>
+                <button class="tt-cat-btn" onclick="openZoomPage('thermo')">Thermodynamics</button>
+            </div>
+
+            <div class="control-deck" id="controlDeck">
+                <div style="font-size: 11px; font-weight: 700; color: #3b82f6; text-align: center; margin-bottom: -4px;" id="activeSelectionStatus">
+                    Active: 2m Temperature
+                </div>
+                
+                <div class="media-strip" id="globalMediaStrip">
+                    <div class="btn-group">
+                        <button class="action-icon" id="prevBtn"><i class="fa-solid fa-backward-step"></i></button>
+                        <button class="action-icon" id="playBtn"><i class="fa-solid fa-play"></i></button>
+                        <button class="action-icon" id="nextBtn"><i class="fa-solid fa-forward-step"></i></button>
+                    </div>
+                    <div class="slider-wrapper">
+                        <input type="range" id="timeSlider" min="0" max="0" value="0" disabled>
+                    </div>
+                </div>
+
+                <div class="utility-row">
+                    <button class="util-btn accent" id="regionsToggleBtn"><i class="fa-solid fa-earth-americas"></i> Regions</button>
+                    <button class="util-btn" onclick="alert('Compiling high-resolution canvas loop...')"><i class="fa-solid fa-wand-magic-sparkles"></i> Forecast GIF</button>
+                </div>
+
+                <div class="metadata-bar">
+                    <select class="select-custom" id="runDropdownSelector">
+                        <option id="computedRunLabel">Syncing with server...</option>
+                    </select>
+                    <div class="val-step" id="stepDisplay">F000</div>
+                </div>
+            </div>
+
+            <div class="regions-drawer" id="regionsDrawer">
+                <div class="grid-layout">
+                    <div class="grid-tile active">CONUS View</div>
+                    <div class="grid-tile">Northeast</div>
+                    <div class="grid-tile">Southeast</div>
+                    <div class="grid-tile">North-Central</div>
+                    <div class="grid-tile">South-Central</div>
+                    <div class="grid-tile">Western U.S.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="parameter-zoom-page" id="zoomPage">
+        <div class="zoom-header">
+            <button class="zoom-back-btn" onclick="closeZoomPage()">
+                <i class="fa-solid fa-chevron-left"></i> Map View
+            </button>
+            <div class="zoom-title" id="zoomTitle">Parameters</div>
+        </div>
+        <div class="zoom-content">
+            <div class="zoom-grid" id="zoomGrid"></div>
+        </div>
+    </div>
+
+<script>
+    // ==================================================
+    // NAVIGATION CONTROLLER
+    // ==================================================
+    function navigateToPage(targetPageId) {
+        if(targetPageId === 'homepageView') { stopAnimation(); }
+        
+        document.querySelectorAll('.page-container').forEach(page => {
+            page.classList.remove('active');
+        });
+        document.getElementById(targetPageId).classList.add('active');
+    }
+
+    function syncHomepageMetrics() {
+        const now = new Date();
+        const currentHour = now.getHours();
+        
+        let greeting = "Good Midnight";
+        if (currentHour >= 5 && currentHour < 12) greeting = "Good Morning";
+        else if (currentHour >= 12 && currentHour < 17) greeting = "Good Afternoon";
+        else if (currentHour >= 17 && currentHour < 22) greeting = "Good Evening";
+        document.getElementById("welcomeGreeting").textContent = greeting;
+
+        const timeOptions = { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' };
+        document.getElementById("homeTimeLabel").textContent = now.toLocaleTimeString(undefined, timeOptions);
+    }
+    syncHomepageMetrics();
+    setInterval(syncHomepageMetrics, 30000);
+
+    // ==================================================
+    // GLOBAL RUN DATA AND RUNTIME CLOCK MECHANICS
+    // ==================================================
+    let baseRunZDate = new Date();
+
+    function computeDynamicForecastCycle() {
+        const now = new Date();
+        let year = now.getUTCFullYear();
+        let month = now.getUTCMonth();
+        let date = now.getUTCDate();
+        let hours = now.getUTCHours();
+
+        let targetCycleHour = 0;
+        if (hours >= 22) { targetCycleHour = 18; }
+        else if (hours >= 16) { targetCycleHour = 12; }
+        else if (hours >= 10) { targetCycleHour = 6; }
+        else if (hours >= 4) { targetCycleHour = 0; }
+        else {
+            targetCycleHour = 18;
+            date -= 1;
+        }
+
+        baseRunZDate = new Date(Date.UTC(year, month, date, targetCycleHour, 0, 0));
+
+        const labelMonth = baseRunZDate.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' });
+        const labelDay = baseRunZDate.getUTCDate();
+        const runString = `Run: ${String(targetCycleHour).padStart(2, '0')}Z ${labelMonth} ${labelDay} (Latest)`;
+        
+        document.getElementById("computedRunLabel").textContent = runString;
+    }
+    computeDynamicForecastCycle();
+
+    const database = {};
+    const labels = {
+        "moisture": "Precip / Moisture Fields",
+        "lower-dyn": "Lower Dynamics",
+        "upper-dyn": "Upper Dynamics",
+        "thermo": "Thermodynamics"
+    };
+
+    Object.keys(labels).forEach(key => {
+        database[key] = [];
+        for(let i = 1; i <= 25; i++) { database[key].push(`${labels[key]} Parameter ${i}`); }
+    });
+    database["thermo"][0] = "2m Temperature";
+    database["thermo"][1] = "2m Dewpoint";
+    
+    let activeGlobalProduct = "2m Temperature";
+
+    const zoomPage = document.getElementById('zoomPage');
+    const zoomTitle = document.getElementById('zoomTitle');
+    const zoomGrid = document.getElementById('zoomGrid');
+    const statusText = document.getElementById('activeSelectionStatus');
+
+    function openZoomPage(catKey) {
+        zoomTitle.textContent = labels[catKey];
+        zoomGrid.innerHTML = '';
+        database[catKey].forEach(product => {
+            const btn = document.createElement('button');
+            btn.className = `zoom-item-btn ${product === activeGlobalProduct ? 'selected' : ''}`;
+            btn.textContent = product;
+            btn.addEventListener('click', () => {
+                activeGlobalProduct = product;
+                statusText.textContent = `Active: ${product}`;
+                closeZoomPage();
+            });
+            zoomGrid.appendChild(btn);
+        });
+        zoomPage.classList.add('active');
+    }
+    function closeZoomPage() { zoomPage.classList.remove('active'); }
+
+    // ==================================================
+    // FILENAME SUFFIX CANVAS ENGINE (METHOD B - 2D GRID)
+    // ==================================================
+    let stepNames = [];
+    let stepHours = [];
+    let totalFrames = 0;
+    let gridCols = 1; 
+    let currentFrameIndex = 0;
+    let frameHeight = 0;
+    let frameWidth = 0;
+    let animationInterval = null;
+
+    const canvas = document.getElementById("mapCanvas");
+    const ctx = canvas.getContext("2d");
+    const slider = document.getElementById("timeSlider");
+    const stepDisplay = document.getElementById("stepDisplay");
+    const forecastTimeHud = document.getElementById("forecastTimeHud");
+    const playBtn = document.getElementById("playBtn");
+    const prevBtn = document.getElementById("prevBtn");
+    const nextBtn = document.getElementById("nextBtn");
+    const regionsToggleBtn = document.getElementById("regionsToggleBtn");
+    const regionsDrawer = document.getElementById("regionsDrawer");
+    
+    const viewportWrapper = document.getElementById("viewportWrapper");
+    const fullscreenToggleBtn = document.getElementById("fullscreenToggleBtn");
+    const fsIcon = document.getElementById("fsIcon");
+    const fsHudStatus = document.getElementById("fsHudStatus");
+
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+
+    /**
+     * Extracts total frames and columns to map the 2D spritesheet dynamically
+     * @param {string} imageUrl - Remote paths targeting raw composite .webp grids
+     */
+    function loadWeatherModelLoop(imageUrl) {
+        stopAnimation(); 
+        
+        let parsedHourInterval = 3;
+        
+        // METHOD B Matcher: Extract TOTAL frames and COLUMNS (e.g., _84_15.webp)
+        const matches = imageUrl.match(/_(\d+)_(\d+)\.webp/);
+        if (matches && matches[1] && matches[2]) {
+            totalFrames = parseInt(matches[1], 10);
+            gridCols = parseInt(matches[2], 10);
+        } else {
+            console.warn("⚠️ Filename grid format match missing. Applying fallback baseline.");
+            totalFrames = 13; 
+            gridCols = 13; 
+        }
+        
+        img.onload = function() {
+            // Calculate grid rows and actual frame dimensions based on the 2D grid
+            const gridRows = Math.ceil(totalFrames / gridCols);
+            frameWidth = img.width / gridCols; 
+            frameHeight = img.height / gridRows; 
+            
+            canvas.width = frameWidth; 
+            canvas.height = frameHeight;
+            
+            stepNames = [];
+            stepHours = [];
+            for (let i = 0; i < totalFrames; i++) {
+                const currentHour = i * parsedHourInterval;
+                stepHours.push(currentHour);
+                stepNames.push(`F${String(currentHour).padStart(3, '0')}`);
+            }
+            
+            slider.min = 0;
+            slider.max = totalFrames - 1;
+            slider.value = 0;
+            slider.disabled = totalFrames <= 1;
+            
+            renderFrame(0);
+        };
+        img.src = imageUrl;
+    }
+
+    // ==================================================
+    // AUTOMATIC FILE DETECTION ENGINE (METHOD B)
+    // ==================================================
+    async function autoDiscoverAndLoadLoop() {
+        const repoApiUrl = "https://api.github.com/repos/phillyweatherguy/BaroClinic-Weather---Backend/contents/run_conus";
+        
+        try {
+            const response = await fetch(repoApiUrl, { cache: "no-store" });
+            if (!response.ok) throw new Error("Repository indexing failed");
+            
+            const files = await response.json();
+            // Look for the new double-underscore 2D grid format
+            const targetFile = files.find(file => /t2m_dark_sheet_\d+_\d+\.webp$/.test(file.name));
+            
+            if (targetFile) {
+                console.log(`🎯 Auto-detected active grid spritesheet: ${targetFile.name}`);
+                const rawUrl = `https://phillyweatherguy.github.io/BaroClinic-Weather---Backend/run_conus/${targetFile.name}?v=${new Date().getTime()}`;
+                loadWeatherModelLoop(rawUrl);
+            } else {
+                console.warn("⚠️ No dynamic grid spritesheet found in directory. Using fallback baseline.");
+                loadWeatherModelLoop("https://phillyweatherguy.github.io/BaroClinic-Weather---Backend/run_conus/t2m_dark_sheet_2_2.webp");
+            }
+        } catch (error) {
+            console.error("❌ Auto-discovery failed:", error);
+        }
+    }
+
+    // Initialize the auto-detector on page load
+    autoDiscoverAndLoadLoop();
+
+    function updateForecastLocalTime(frameIndex) {
+        if (!stepHours[frameIndex] && stepHours[frameIndex] !== 0) return;
+        
+        const workingTargetDate = new Date(baseRunZDate.getTime());
+        workingTargetDate.setUTCHours(workingTargetDate.getUTCHours() + stepHours[frameIndex]);
+
+        const layoutOptions = { 
+            weekday: 'short', month: 'short', day: 'numeric', 
+            hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
+        };
+        forecastTimeHud.textContent = workingTargetDate.toLocaleString(undefined, layoutOptions);
+    }
+
+    function renderFrame(index) {
+        if (!frameWidth || !frameHeight || totalFrames === 0) return;
+        currentFrameIndex = index;
+        slider.value = index;
+        
+        const currentLabel = stepNames[index] || `F${String(index).padStart(3, '0')}`;
+        stepDisplay.textContent = currentLabel;
+        fsHudStatus.textContent = currentLabel;
+        
+        updateForecastLocalTime(index);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // 🧮 2D Grid Math: Calculate exact X and Y coordinates to slice from
+        const col = index % gridCols;
+        const row = Math.floor(index / gridCols);
+        const sourceX = col * frameWidth;
+        const sourceY = row * frameHeight;
+
+        ctx.drawImage(img, sourceX, sourceY, frameWidth, frameHeight, 0, 0, frameWidth, frameHeight);
+    }
+
+    // Slider Controls
+    slider.addEventListener("input", (e) => {
+        stopAnimation();
+        renderFrame(parseInt(e.target.value, 10));
+    });
+
+    // Media Strip Controls
+    function seekNextFrame() {
+        let targetIndex = currentFrameIndex + 1;
+        if (targetIndex >= totalFrames) targetIndex = 0;
+        renderFrame(targetIndex);
+    }
+
+    function seekPrevFrame() {
+        let targetIndex = currentFrameIndex - 1;
+        if (targetIndex < 0) targetIndex = totalFrames - 1;
+        renderFrame(targetIndex);
+    }
+
+    function toggleAnimation() {
+        if (animationInterval) {
+            stopAnimation();
+        } else {
+            playBtn.innerHTML = '<i class="fa-solid fa-pause"></i>';
+            animationInterval = setInterval(seekNextFrame, 400);
+        }
+    }
+
+    function stopAnimation() {
+        if (animationInterval) {
+            clearInterval(animationInterval);
+            animationInterval = null;
+        }
+        playBtn.innerHTML = '<i class="fa-solid fa-play"></i>';
+    }
+
+    playBtn.addEventListener("click", toggleAnimation);
+    nextBtn.addEventListener("click", () => { stopAnimation(); seekNextFrame(); });
+    prevBtn.addEventListener("click", () => { stopAnimation(); seekPrevFrame(); });
+
+    regionsToggleBtn.addEventListener("click", () => { regionsDrawer.classList.toggle("open"); });
+
+    fullscreenToggleBtn.addEventListener("click", () => {
+        viewportWrapper.classList.toggle("fullscreen-mode");
+        const isFS = viewportWrapper.classList.contains("fullscreen-mode");
+        fsIcon.className = isFS ? "fa-solid fa-compress" : "fa-solid fa-expand";
+        handleSeekEnd(); 
+    });
+
+    // Tap Gesture Navigation Systems
+    let holdGestureInterval = null, gestureDelayTimeout = null;
+
+    function handleSeekStart(clientX) {
+        stopAnimation();
+        handleSeekEnd(); 
+        if (!viewportWrapper.classList.contains("fullscreen-mode")) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const clickPositionPercent = (clientX - rect.left) / rect.width;
+
+        if (clickPositionPercent > 0.7) {
+            seekNextFrame();
+            gestureDelayTimeout = setTimeout(() => {
+                fsHudStatus.classList.add("visible");
+                holdGestureInterval = setInterval(seekNextFrame, 220);
+            }, 400);
+        } else if (clickPositionPercent < 0.3) {
+            seekPrevFrame();
+            gestureDelayTimeout = setTimeout(() => {
+                fsHudStatus.classList.add("visible");
+                holdGestureInterval = setInterval(seekPrevFrame, 220);
+            }, 400);
+        }
+    }
+
+    function handleSeekEnd() {
+        if (gestureDelayTimeout) { clearTimeout(gestureDelayTimeout); gestureDelayTimeout = null; }
+        if (holdGestureInterval) { clearInterval(holdGestureInterval); holdGestureInterval = null; }
+        fsHudStatus.classList.remove("visible");
+    }
+
+    canvas.addEventListener("mousedown", (e) => handleSeekStart(e.clientX));
+    window.addEventListener("mouseup", handleSeekEnd);
+    canvas.addEventListener("touchstart", (e) => {
+        if(e.touches.length > 0) handleSeekStart(e.touches[0].clientX);
+    }, {passive: true});
+    window.addEventListener("touchend", handleSeekEnd);
+</script>
+</body>
+</html>
