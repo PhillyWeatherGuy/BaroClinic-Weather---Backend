@@ -8,23 +8,13 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
-permissions:
-  contents: write
-  pages: write
-  id-token: write
-
 jobs:
   build-and-plot:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
 
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -42,19 +32,10 @@ jobs:
         python -m pip install --upgrade pip
         pip install numpy xarray pillow cfgrib ecmwf-opendata rioxarray boto3
 
-    - name: Run Weather Data Texture Pipeline
+    - name: Run Weather Data Texture Pipeline & Upload to B2
       env:
         B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
         B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
         B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
       run: |
         python process.py
-
-    - name: Upload Artifact for GitHub Pages
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: '.'
-
-    - name: Deploy to GitHub Pages
-      id: deployment
-      uses: actions/deploy-pages@v4
