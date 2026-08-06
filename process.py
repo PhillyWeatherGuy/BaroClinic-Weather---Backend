@@ -9,6 +9,7 @@ from PIL import Image
 from ecmwf.opendata import Client
 import rioxarray
 from rasterio.enums import Resampling
+import boto3
 
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
@@ -134,6 +135,47 @@ def build_spritesheet_chunks(frame_arrays, steps_written):
     return chunks, frame_w, frame_h
 
 
+def upload_to_b2(folder_path, bucket_name="baroclinic-weather-data"):
+    """
+    Uploads all generated files in the output directory to Backblaze B2 using 
+    credentials supplied by environment variables (GitHub Secrets).
+    """
+    endpoint = os.environ.get("B2_ENDPOINT")
+    key_id = os.environ.get("B2_KEY_ID")
+    app_key = os.environ.get("B2_APPLICATION_KEY")
+
+    if not all([endpoint, key_id, app_key]):
+        print("⚠️ B2 Credentials not set in environment. Skipping cloud upload.")
+        return
+
+    print("\n☁️ Uploading generated assets to Backblaze B2...")
+
+    # Initialize S3 Client targeting Backblaze
+    s3_client = boto3.client(
+        service_name='s3',
+        endpoint_url=f"https://{endpoint}",
+        aws_access_key_id=key_id,
+        aws_secret_access_key=app_key
+    )
+
+    for filename in os.listdir(folder_path):
+        filepath = os.path.join(folder_path, filename)
+        if os.path.isfile(filepath):
+            # Determine content type (JSON vs PNG)
+            content_type = "application/json" if filename.endswith(".json") else "image/png"
+            
+            try:
+                s3_client.upload_file(
+                    filepath,
+                    bucket_name,
+                    filename,
+                    ExtraArgs={'ContentType': content_type}
+                )
+                print(f"  ✅ Uploaded to B2: {filename}")
+            except Exception as e:
+                print(f"  ❌ Failed to upload {filename}: {e}")
+
+
 def run_master_pipeline():
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     current_hour = now_utc.hour
@@ -228,6 +270,9 @@ def run_master_pipeline():
         json.dump(manifest, f, indent=2)
 
     print(f"\n🎉 Pipeline Finished! {len(chunks)} spritesheet(s) and manifest ready in {OUTPUT_DIST_DIR}/")
+
+    # Upload outputs directly to Backblaze B2
+    upload_to_b2(OUTPUT_DIST_DIR)
 
 
 if __name__ == "__main__":
