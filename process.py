@@ -1,4 +1,5 @@
 import os
+import shutil
 import datetime
 import glob
 import json
@@ -273,6 +274,16 @@ def run_master_pipeline():
 
     # Upload outputs directly to Backblaze B2
     upload_to_b2(OUTPUT_DIST_DIR)
+    
+    # ==============================================================================
+    # CLEANUP ROUTINE
+    # ==============================================================================
+    print(f"\n🧹 Cleaning up: Deleting local {OUTPUT_DIST_DIR}/ folder...")
+    try:
+        shutil.rmtree(OUTPUT_DIST_DIR)
+        print("  ✅ Cleanup complete. Workspace is spotless!")
+    except Exception as e:
+        print(f"  ❌ Failed to delete folder: {e}")
 
 
 if __name__ == "__main__":
