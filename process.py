@@ -33,7 +33,7 @@ MAX_TEXTURE_SIZE = 8192
 MAX_CONCURRENT_WORKERS = 8
 
 
-def process_grib_to_array(grib_path):
+def process_grib_to_array(grib_path, parameter):
     """
     Reads a GRIB file, normalizes coordinates, clips to Web Mercator latitude 
     bounds (~85.0511° N/S), reprojects to EPSG:3857 using cubic resampling, 
@@ -58,19 +58,21 @@ def process_grib_to_array(grib_path):
     # Clip latitudes to Web Mercator map limits
     ds = ds.sel(latitude=slice(85.051129, -85.051129))
 
-    temp_data = ds['t2m'] if 't2m' in ds else ds[list(ds.data_vars)[0]]
+    # Select dynamic parameter variable safely
+    target_var = parameter if parameter in ds else list(ds.data_vars)[0]
+    data_array = ds[target_var]
 
     # Reproject WGS84 -> Web Mercator (EPSG:3857) with 100% full cubic resolution
-    temp_data.rio.set_spatial_dims(x_dim="longitude", y_dim="latitude", inplace=True)
-    temp_data.rio.write_crs("EPSG:4326", inplace=True)
+    data_array.rio.set_spatial_dims(x_dim="longitude", y_dim="latitude", inplace=True)
+    data_array.rio.write_crs("EPSG:4326", inplace=True)
 
-    temp_mercator = temp_data.rio.reproject(
+    mercator_data = data_array.rio.reproject(
         "EPSG:3857",
         resampling=Resampling.cubic
     )
 
     # Extract raw numpy array
-    arr = np.squeeze(temp_mercator.values)
+    arr = np.squeeze(mercator_data.values)
     ds.close()
 
     # Fast in-place memory normalization (0 allocations)
@@ -83,19 +85,19 @@ def process_grib_to_array(grib_path):
     return arr.astype(np.uint8)
 
 
-def fetch_and_process_step(client, target_date, chosen_run, step):
+def fetch_and_process_step(client, target_date, chosen_run, step, parameter, model_name):
     """
     Worker task: Downloads a single forecast step GRIB file, converts it to array,
     and cleans up local GRIB storage immediately.
     """
-    grib_file = f"ecmwf_t2m_{step:03d}.grib2"
+    grib_file = f"{model_name}_{parameter}_{step:03d}.grib2"
     try:
         client.retrieve(
             date=target_date, time=int(chosen_run), step=step,
-            type="fc", levtype="sfc", param=["2t"], target=grib_file
+            type="fc", levtype="sfc", param=[parameter], target=grib_file
         )
         if os.path.exists(grib_file):
-            frame_arr = process_grib_to_array(grib_file)
+            frame_arr = process_grib_to_array(grib_file, parameter)
             try: os.remove(grib_file)
             except Exception: pass
             print(f"  ⚡ Processed F{step:03d}")
@@ -108,7 +110,7 @@ def fetch_and_process_step(client, target_date, chosen_run, step):
     return step, None
 
 
-def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_date, chosen_run):
+def build_spritesheet_chunks(frame_arrays, steps_written, model_name, parameter, target_date, chosen_run):
     """
     Packs in-memory 2D uint8 numpy arrays into 8192x8192 WebGL texture atlases.
     """
@@ -144,7 +146,8 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_dat
 
             spritesheet_arr[y_start:y_end, x_start:x_end] = arr
 
-        spritesheet_filename = f"{model_name}_{target_date}_{chosen_run}z_t2m_spritesheet_{chunk_idx}.png"
+        # 🌟 Structured naming: model_parameter_date_run_chunk.png
+        spritesheet_filename = f"{model_name}_{parameter}_{target_date}_{chosen_run}z_spritesheet_{chunk_idx}.png"
         
         chunks.append({
             "array": spritesheet_arr,
@@ -208,6 +211,9 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
 
 
 def run_master_pipeline():
+    MODEL_NAME = "ecmwf"
+    PARAMETER = "2t"
+
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     current_hour = now_utc.hour
 
@@ -224,9 +230,12 @@ def run_master_pipeline():
         CHOSEN_RUN = "12"
         target_date = (now_utc - datetime.timedelta(days=1)).strftime("%Y%m%d")
 
-    print(f"🌍 UTC: {current_hour:02d}z → Selected ECMWF run: {CHOSEN_RUN}z on {target_date}")
+    # 🌟 Formatted ISO Initialization Timestamp (Crucial for frontend clock calculation)
+    init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
-    for f in glob.glob("ecmwf_t2m_*.grib2"):
+    print(f"🌍 Model: {MODEL_NAME} | Param: {PARAMETER} | Run: {CHOSEN_RUN}z on {target_date}")
+
+    for f in glob.glob(f"{MODEL_NAME}_{PARAMETER}_*.grib2"):
         try: os.remove(f)
         except Exception: pass
 
@@ -239,7 +248,7 @@ def run_master_pipeline():
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         future_to_step = {
-            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step): step
+            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step, PARAMETER, MODEL_NAME): step
             for step in FORECAST_STEPS
         }
         for future in concurrent.futures.as_completed(future_to_step):
@@ -258,7 +267,8 @@ def run_master_pipeline():
     chunks, frame_w, frame_h = build_spritesheet_chunks(
         frame_arrays, 
         steps_written, 
-        model_name="ecmwf", 
+        model_name=MODEL_NAME, 
+        parameter=PARAMETER,
         target_date=target_date, 
         chosen_run=CHOSEN_RUN
     )
@@ -270,17 +280,18 @@ def run_master_pipeline():
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(OUTPUT_DIST_DIR, filename)
         
-        # Fast OpenCV PNG write using compression level 3
         cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
         
         manifest_chunks.append(chunk["manifest_data"])
         print(f"  💾 Saved spritesheet via cv2: {filename}")
 
+    # 🌟 Clean, structured manifest JSON with explicit model metadata & init_time
     manifest = {
-        "model": "ecmwf",
+        "model": MODEL_NAME,
+        "parameter": PARAMETER,
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
-        "parameter": "2t",
+        "init_time": init_time_iso,  # Frontend reads this to compute exact valid times!
         "type": "spritesheet_chunked",
         "total_frames": len(steps_written),
         "frame_width": frame_w,
