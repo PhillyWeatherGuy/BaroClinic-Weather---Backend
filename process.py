@@ -1,4 +1,4 @@
-import os 
+import os
 import shutil
 import datetime
 import glob
@@ -76,7 +76,7 @@ def process_grib_to_array(grib_path):
     return gray_image
 
 
-def build_spritesheet_chunks(frame_arrays, steps_written):
+def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_date, chosen_run):
     """
     Packs in-memory 2D uint8 numpy arrays into 8192x8192 WebGL texture atlases.
     Outputs chunks ready for PNG export and manifest metadata.
@@ -119,7 +119,9 @@ def build_spritesheet_chunks(frame_arrays, steps_written):
             spritesheet_arr[y_start:y_end, x_start:x_end] = arr
 
         spritesheet_img = Image.fromarray(spritesheet_arr, mode='L')
-        spritesheet_filename = f"t2m_spritesheet_{chunk_idx}.png"
+        
+        # New dynamically generated filename
+        spritesheet_filename = f"{model_name}_{target_date}_{chosen_run}z_t2m_spritesheet_{chunk_idx}.png"
         
         chunks.append({
             "image": spritesheet_img,
@@ -238,8 +240,14 @@ def run_master_pipeline():
         print("❌ No frames were processed. Exiting pipeline.")
         return
 
-    # Pass in-memory frame arrays into the chunking engine
-    chunks, frame_w, frame_h = build_spritesheet_chunks(frame_arrays, steps_written)
+    # Pass in-memory frame arrays and metadata into the chunking engine
+    chunks, frame_w, frame_h = build_spritesheet_chunks(
+        frame_arrays, 
+        steps_written, 
+        model_name="ecmwf", 
+        target_date=target_date, 
+        chosen_run=CHOSEN_RUN
+    )
 
     manifest_chunks = []
     
@@ -255,6 +263,8 @@ def run_master_pipeline():
     # Build master manifest JSON
     manifest = {
         "model": "ecmwf",
+        "run": f"{CHOSEN_RUN}z",
+        "date": target_date,
         "parameter": "2t",
         "type": "spritesheet_chunked",
         "total_frames": len(steps_written),
