@@ -4,6 +4,7 @@ import datetime
 import glob
 import json
 import math
+import concurrent.futures
 import numpy as np
 import xarray as xr
 from PIL import Image
@@ -11,6 +12,9 @@ from ecmwf.opendata import Client
 import rioxarray
 from rasterio.enums import Resampling
 import boto3
+
+# Enable multi-threaded GDAL reprojection globally
+os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
@@ -24,6 +28,9 @@ TEMP_MAX_K = 330.0  # ~  134.33°F
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
 MAX_TEXTURE_SIZE = 8192 
+
+# Worker count matching runner hardware (safely tuned for RAM limits)
+MAX_CONCURRENT_WORKERS = min(4, os.cpu_count() or 2)
 
 
 def process_grib_to_array(grib_path):
@@ -76,17 +83,40 @@ def process_grib_to_array(grib_path):
     return gray_image
 
 
+def fetch_and_process_step(client, target_date, chosen_run, step):
+    """
+    Worker task: Downloads a single forecast step GRIB file, converts it to array,
+    and cleans up local GRIB storage immediately.
+    """
+    grib_file = f"ecmwf_t2m_{step:03d}.grib2"
+    try:
+        client.retrieve(
+            date=target_date, time=int(chosen_run), step=step,
+            type="fc", levtype="sfc", param=["2t"], target=grib_file
+        )
+        if os.path.exists(grib_file):
+            frame_arr = process_grib_to_array(grib_file)
+            try: os.remove(grib_file)
+            except Exception: pass
+            print(f"  ⚡ Processed F{step:03d}")
+            return step, frame_arr
+    except Exception as e:
+        print(f"  ❌ Error processing F{step:03d}: {e}")
+        if os.path.exists(grib_file):
+            try: os.remove(grib_file)
+            except Exception: pass
+    return step, None
+
+
 def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_date, chosen_run):
     """
     Packs in-memory 2D uint8 numpy arrays into 8192x8192 WebGL texture atlases.
-    Outputs chunks ready for PNG export and manifest metadata.
     """
     if not frame_arrays:
         return [], 0, 0
 
     frame_h, frame_w = frame_arrays[0].shape
     
-    # Grid limits based on 8192x8192 WebGL max hardware texture bounds
     max_cols = max(1, MAX_TEXTURE_SIZE // frame_w)
     max_rows = max(1, MAX_TEXTURE_SIZE // frame_h)
     frames_per_sheet = max_cols * max_rows
@@ -96,7 +126,6 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_dat
 
     chunks = []
     
-    # Slice the total in-memory frames into safe-sized chunk arrays
     for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
         chunk_frames = frame_arrays[i:i + frames_per_sheet]
         chunk_steps = steps_written[i:i + frames_per_sheet]
@@ -120,7 +149,6 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_dat
 
         spritesheet_img = Image.fromarray(spritesheet_arr, mode='L')
         
-        # New dynamically generated filename
         spritesheet_filename = f"{model_name}_{target_date}_{chosen_run}z_t2m_spritesheet_{chunk_idx}.png"
         
         chunks.append({
@@ -138,11 +166,21 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_dat
     return chunks, frame_w, frame_h
 
 
-def upload_to_b2(folder_path, bucket_name="baroclinic-weather-data"):
-    """
-    Uploads all generated files in the output directory to Backblaze B2 using 
-    credentials supplied by environment variables (GitHub Secrets).
-    """
+def upload_single_file(s3_client, bucket_name, filepath, filename):
+    content_type = "application/json" if filename.endswith(".json") else "image/png"
+    try:
+        s3_client.upload_file(
+            filepath,
+            bucket_name,
+            filename,
+            ExtraArgs={'ContentType': content_type}
+        )
+        print(f"  ✅ Uploaded to B2: {filename}")
+    except Exception as e:
+        print(f"  ❌ Failed to upload {filename}: {e}")
+
+
+def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
     endpoint = os.environ.get("B2_ENDPOINT")
     key_id = os.environ.get("B2_KEY_ID")
     app_key = os.environ.get("B2_APPLICATION_KEY")
@@ -151,9 +189,8 @@ def upload_to_b2(folder_path, bucket_name="baroclinic-weather-data"):
         print("⚠️ B2 Credentials not set in environment. Skipping cloud upload.")
         return
 
-    print("\n☁️ Uploading generated assets to Backblaze B2...")
+    print("\n☁️ Uploading generated assets to Backblaze B2 concurrently...")
 
-    # Initialize S3 Client targeting Backblaze
     s3_client = boto3.client(
         service_name='s3',
         endpoint_url=f"https://{endpoint}",
@@ -161,22 +198,18 @@ def upload_to_b2(folder_path, bucket_name="baroclinic-weather-data"):
         aws_secret_access_key=app_key
     )
 
-    for filename in os.listdir(folder_path):
-        filepath = os.path.join(folder_path, filename)
-        if os.path.isfile(filepath):
-            # Determine content type (JSON vs PNG)
-            content_type = "application/json" if filename.endswith(".json") else "image/png"
-            
-            try:
-                s3_client.upload_file(
-                    filepath,
-                    bucket_name,
-                    filename,
-                    ExtraArgs={'ContentType': content_type}
-                )
-                print(f"  ✅ Uploaded to B2: {filename}")
-            except Exception as e:
-                print(f"  ❌ Failed to upload {filename}: {e}")
+    files_to_upload = [
+        (os.path.join(folder_path, fname), fname)
+        for fname in os.listdir(folder_path)
+        if os.path.isfile(os.path.join(folder_path, fname))
+    ]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [
+            executor.submit(upload_single_file, s3_client, bucket_name, fpath, fname)
+            for fpath, fname in files_to_upload
+        ]
+        concurrent.futures.wait(futures)
 
 
 def run_master_pipeline():
@@ -198,7 +231,6 @@ def run_master_pipeline():
 
     print(f"🌍 UTC: {current_hour:02d}z → Selected ECMWF run: {CHOSEN_RUN}z on {target_date}")
 
-    # Remove stale GRIB files from previous interrupted runs
     for f in glob.glob("ecmwf_t2m_*.grib2"):
         try: os.remove(f)
         except Exception: pass
@@ -206,41 +238,30 @@ def run_master_pipeline():
     client = Client(source="azure", model="ifs", resol="0p25")
     os.makedirs(OUTPUT_DIST_DIR, exist_ok=True)
 
-    frame_arrays = []
-    steps_written = []
+    results = {}
 
-    for step in FORECAST_STEPS:
-        print(f"\n⏰ Downloading & processing F{step:03d}...")
-        grib_file = f"ecmwf_t2m_{step:03d}.grib2"
+    print(f"⚡ Starting multi-threaded download & processing pipeline ({MAX_CONCURRENT_WORKERS} workers)...")
+    
+    # Run network downloads and CPU reprojections concurrently
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
+        future_to_step = {
+            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step): step
+            for step in FORECAST_STEPS
+        }
+        for future in concurrent.futures.as_completed(future_to_step):
+            step, arr = future.result()
+            if arr is not None:
+                results[step] = arr
 
-        try:
-            client.retrieve(
-                date=target_date, time=int(CHOSEN_RUN), step=step,
-                type="fc", levtype="sfc", param=["2t"], target=grib_file
-            )
-        except Exception as e:
-            print(f"  ❌ Download failed for F{step:03d}: {e}")
-            continue
-
-        if os.path.exists(grib_file):
-            try:
-                # Process GRIB into memory array
-                frame_arr = process_grib_to_array(grib_file)
-                frame_arrays.append(frame_arr)
-                steps_written.append(step)
-                print(f"  ⚡ Processed frame array for F{step:03d} into memory buffer")
-            except Exception as err:
-                print(f"  ⚠️ Error generating array F{step:03d}: {err}")
-
-            # Immediately delete raw GRIB file
-            try: os.remove(grib_file)
-            except Exception: pass
+    # Sort results to keep correct chronological order
+    sorted_steps = sorted(results.keys())
+    frame_arrays = [results[s] for s in sorted_steps]
+    steps_written = sorted_steps
 
     if not frame_arrays:
         print("❌ No frames were processed. Exiting pipeline.")
         return
 
-    # Pass in-memory frame arrays and metadata into the chunking engine
     chunks, frame_w, frame_h = build_spritesheet_chunks(
         frame_arrays, 
         steps_written, 
@@ -251,16 +272,16 @@ def run_master_pipeline():
 
     manifest_chunks = []
     
-    # Save ONLY the combined spritesheet PNG chunks to disk
+    # Save PNG chunks with optimized compression (lossless, zero resolution impact)
     for chunk in chunks:
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(OUTPUT_DIST_DIR, filename)
         
-        chunk["image"].save(filepath, format='PNG', optimize=True)
+        # compress_level=3 is ~5x faster than optimize=True with identical pixel data
+        chunk["image"].save(filepath, format='PNG', compress_level=3)
         manifest_chunks.append(chunk["manifest_data"])
         print(f"  💾 Saved spritesheet: {filename}")
 
-    # Build master manifest JSON
     manifest = {
         "model": "ecmwf",
         "run": f"{CHOSEN_RUN}z",
@@ -282,12 +303,8 @@ def run_master_pipeline():
 
     print(f"\n🎉 Pipeline Finished! {len(chunks)} spritesheet(s) and manifest ready in {OUTPUT_DIST_DIR}/")
 
-    # Upload outputs directly to Backblaze B2
-    upload_to_b2(OUTPUT_DIST_DIR)
+    upload_to_b2_parallel(OUTPUT_DIST_DIR)
     
-    # ==============================================================================
-    # CLEANUP ROUTINE
-    # ==============================================================================
     print(f"\n🧹 Cleaning up: Deleting local {OUTPUT_DIST_DIR}/ folder...")
     try:
         shutil.rmtree(OUTPUT_DIST_DIR)
