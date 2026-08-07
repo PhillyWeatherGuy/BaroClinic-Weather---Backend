@@ -7,7 +7,7 @@ import math
 import concurrent.futures
 import numpy as np
 import xarray as xr
-from PIL import Image
+import cv2
 from ecmwf.opendata import Client
 import rioxarray
 from rasterio.enums import Resampling
@@ -29,14 +29,15 @@ TEMP_MAX_K = 330.0  # ~  134.33°F
 # Universally safe WebGL max texture size for desktop & mobile GPUs
 MAX_TEXTURE_SIZE = 8192 
 
-# Worker count matching runner hardware (safely tuned for RAM limits)
-MAX_CONCURRENT_WORKERS = min(4, os.cpu_count() or 2)
+# Increased to 8 to maximize network pipeline throughput
+MAX_CONCURRENT_WORKERS = 8
 
 
 def process_grib_to_array(grib_path):
     """
     Reads a GRIB file, normalizes coordinates, clips to Web Mercator latitude 
-    bounds (~85.0511° N/S), reprojects to EPSG:3857, and returns an 8-bit uint8 numpy array.
+    bounds (~85.0511° N/S), reprojects to EPSG:3857 using cubic resampling, 
+    and performs in-place uint8 array scaling.
     """
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
@@ -58,10 +59,8 @@ def process_grib_to_array(grib_path):
     ds = ds.sel(latitude=slice(85.051129, -85.051129))
 
     temp_data = ds['t2m'] if 't2m' in ds else ds[list(ds.data_vars)[0]]
-    if temp_data.ndim > 2:
-        temp_data = temp_data.squeeze()
 
-    # Define CRS as WGS84 and reproject to Web Mercator (EPSG:3857)
+    # Reproject WGS84 -> Web Mercator (EPSG:3857) with 100% full cubic resolution
     temp_data.rio.set_spatial_dims(x_dim="longitude", y_dim="latitude", inplace=True)
     temp_data.rio.write_crs("EPSG:4326", inplace=True)
 
@@ -70,17 +69,18 @@ def process_grib_to_array(grib_path):
         resampling=Resampling.cubic
     )
 
-    arr = temp_mercator.values
-    if arr.ndim > 2:
-        arr = np.squeeze(arr)
-
-    # Fill NaNs and normalize Kelvin temperatures to uint8 (0-255)
-    arr = np.nan_to_num(arr, nan=TEMP_MIN_K)
-    normalized = np.clip((arr - TEMP_MIN_K) / (TEMP_MAX_K - TEMP_MIN_K), 0.0, 1.0)
-    gray_image = (normalized * 255.0).astype(np.uint8)
-
+    # Extract raw numpy array
+    arr = np.squeeze(temp_mercator.values)
     ds.close()
-    return gray_image
+
+    # Fast in-place memory normalization (0 allocations)
+    arr = np.nan_to_num(arr, copy=False, nan=TEMP_MIN_K)
+    np.clip(arr, TEMP_MIN_K, TEMP_MAX_K, out=arr)
+    arr -= TEMP_MIN_K
+    arr /= (TEMP_MAX_K - TEMP_MIN_K)
+    arr *= 255.0
+
+    return arr.astype(np.uint8)
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step):
@@ -121,9 +121,6 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_dat
     max_rows = max(1, MAX_TEXTURE_SIZE // frame_h)
     frames_per_sheet = max_cols * max_rows
 
-    print(f"📊 Grid Math: Max {max_cols} cols x {max_rows} rows per sheet ({frame_w}x{frame_h} per frame).")
-    print(f"📏 Max frames per spritesheet chunk: {frames_per_sheet}")
-
     chunks = []
     
     for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
@@ -147,12 +144,10 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, target_dat
 
             spritesheet_arr[y_start:y_end, x_start:x_end] = arr
 
-        spritesheet_img = Image.fromarray(spritesheet_arr, mode='L')
-        
         spritesheet_filename = f"{model_name}_{target_date}_{chosen_run}z_t2m_spritesheet_{chunk_idx}.png"
         
         chunks.append({
-            "image": spritesheet_img,
+            "array": spritesheet_arr,
             "manifest_data": {
                 "file": spritesheet_filename,
                 "forecast_steps": chunk_steps,
@@ -240,9 +235,8 @@ def run_master_pipeline():
 
     results = {}
 
-    print(f"⚡ Starting multi-threaded download & processing pipeline ({MAX_CONCURRENT_WORKERS} workers)...")
+    print(f"⚡ Starting multi-threaded pipeline ({MAX_CONCURRENT_WORKERS} workers)...")
     
-    # Run network downloads and CPU reprojections concurrently
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         future_to_step = {
             executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step): step
@@ -253,7 +247,6 @@ def run_master_pipeline():
             if arr is not None:
                 results[step] = arr
 
-    # Sort results to keep correct chronological order
     sorted_steps = sorted(results.keys())
     frame_arrays = [results[s] for s in sorted_steps]
     steps_written = sorted_steps
@@ -272,15 +265,16 @@ def run_master_pipeline():
 
     manifest_chunks = []
     
-    # Save PNG chunks with optimized compression (lossless, zero resolution impact)
+    # Save PNG chunks via OpenCV native C++ writer (compress_level=3)
     for chunk in chunks:
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(OUTPUT_DIST_DIR, filename)
         
-        # compress_level=3 is ~5x faster than optimize=True with identical pixel data
-        chunk["image"].save(filepath, format='PNG', compress_level=3)
+        # Fast OpenCV PNG write using compression level 3
+        cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+        
         manifest_chunks.append(chunk["manifest_data"])
-        print(f"  💾 Saved spritesheet: {filename}")
+        print(f"  💾 Saved spritesheet via cv2: {filename}")
 
     manifest = {
         "model": "ecmwf",
