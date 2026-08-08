@@ -244,4 +244,83 @@ def run_master_pipeline():
 
     results = {}
 
-    print(f"⚡ Starting multi
+    print(f"⚡ Starting multi-threaded pipeline ({MAX_CONCURRENT_WORKERS} workers)...")
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
+        future_to_step = {
+            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step, PARAMETER, MODEL_NAME): step
+            for step in FORECAST_STEPS
+        }
+        for future in concurrent.futures.as_completed(future_to_step):
+            step, arr = future.result()
+            if arr is not None:
+                results[step] = arr
+
+    sorted_steps = sorted(results.keys())
+    frame_arrays = [results[s] for s in sorted_steps]
+    steps_written = sorted_steps
+
+    if not frame_arrays:
+        print("❌ No frames were processed. Exiting pipeline.")
+        return
+
+    chunks, frame_w, frame_h = build_spritesheet_chunks(
+        frame_arrays, 
+        steps_written, 
+        model_name=MODEL_NAME, 
+        parameter=PARAMETER,
+        target_date=target_date, 
+        chosen_run=CHOSEN_RUN
+    )
+
+    manifest_chunks = []
+    
+    # Save PNG chunks via OpenCV native C++ writer (compress_level=3)
+    for chunk in chunks:
+        filename = chunk["manifest_data"]["file"]
+        filepath = os.path.join(OUTPUT_DIST_DIR, filename)
+        
+        cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+        
+        manifest_chunks.append(chunk["manifest_data"])
+        print(f"  💾 Saved spritesheet via cv2: {filename}")
+
+    # 🌟 Clean, structured manifest JSON with explicit model metadata & init_time
+    manifest = {
+        "model": MODEL_NAME,
+        "parameter": PARAMETER,
+        "run": f"{CHOSEN_RUN}z",
+        "date": target_date,
+        "init_time": init_time_iso,  # Frontend reads this to compute exact valid times!
+        "type": "spritesheet_chunked",
+        "total_frames": len(steps_written),
+        "frame_width": frame_w,
+        "frame_height": frame_h,
+        "temp_min_k": TEMP_MIN_K,
+        "temp_max_k": TEMP_MAX_K,
+        "chunks": manifest_chunks,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
+    }
+
+    # 🌟 Save BOTH manifest.json (latest default) and ecmwf_YYYYMMDD_HHz_manifest.json (historical run copy)
+    run_manifest_filename = f"{MODEL_NAME}_{target_date}_{CHOSEN_RUN.lower()}z_manifest.json"
+    for m_fname in ["manifest.json", run_manifest_filename]:
+        m_path = os.path.join(OUTPUT_DIST_DIR, m_fname)
+        with open(m_path, 'w') as f:
+            json.dump(manifest, f, indent=2)
+        print(f"  📄 Saved manifest: {m_fname}")
+
+    print(f"\n🎉 Pipeline Finished! {len(chunks)} spritesheet(s) and manifests ready in {OUTPUT_DIST_DIR}/")
+
+    upload_to_b2_parallel(OUTPUT_DIST_DIR)
+    
+    print(f"\n🧹 Cleaning up: Deleting local {OUTPUT_DIST_DIR}/ folder...")
+    try:
+        shutil.rmtree(OUTPUT_DIST_DIR)
+        print("  ✅ Cleanup complete. Workspace is spotless!")
+    except Exception as e:
+        print(f"  ❌ Failed to delete folder: {e}")
+
+
+if __name__ == "__main__":
+    run_master_pipeline()
