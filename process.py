@@ -214,24 +214,12 @@ def run_master_pipeline():
     MODEL_NAME = "ecmwf"
     PARAMETER = "2t"
 
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    current_hour = now_utc.hour
-
-    if current_hour >= 20:
-        CHOSEN_RUN, target_date = "12", now_utc.strftime("%Y%m%d")
-    elif current_hour >= 14:
-        CHOSEN_RUN, target_date = "06", now_utc.strftime("%Y%m%d")
-    elif current_hour >= 8:
-        CHOSEN_RUN, target_date = "00", now_utc.strftime("%Y%m%d")
-    elif current_hour >= 2:
-        CHOSEN_RUN = "18"
-        target_date = (now_utc - datetime.timedelta(days=1)).strftime("%Y%m%d")
-    else:
-        CHOSEN_RUN = "12"
-        target_date = (now_utc - datetime.timedelta(days=1)).strftime("%Y%m%d")
-
-    # 🌟 Formatted ISO Initialization Timestamp (Crucial for frontend clock calculation)
-    init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
+    # In run_master_pipeline(), temporarily replace the date selection logic with:
+    CHOSEN_RUN = "18"
+    target_date = "20260807"
+    init_time_iso = "2026-08-07T18:00:00Z"
+        # 🌟 Formatted ISO Initialization Timestamp (Crucial for frontend clock calculation)
+        init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
     print(f"🌍 Model: {MODEL_NAME} | Param: {PARAMETER} | Run: {CHOSEN_RUN}z on {target_date}")
 
