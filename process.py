@@ -27,7 +27,7 @@ TEMP_MIN_K = 210.0  # ~ -81.67°F
 TEMP_MAX_K = 330.0  # ~  134.33°F
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
-MAX_TEXTURE_SIZE = 8192 
+MAX_TEXTURE_SIZE = 4096 
 
 # Increased to 8 to maximize network pipeline throughput
 MAX_CONCURRENT_WORKERS = 8
