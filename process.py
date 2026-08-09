@@ -35,9 +35,8 @@ MAX_CONCURRENT_WORKERS = 8
 
 def process_grib_to_array(grib_path, parameter):
     """
-    Reads a GRIB file, normalizes coordinates, clips to Web Mercator latitude 
-    bounds (~85.0511° N/S), reprojects to EPSG:3857 using cubic resampling, 
-    and performs in-place uint8 array scaling.
+    Reads a GRIB file, normalizes coordinates, retains full 90°N to -90°S latitude 
+    coverage (EPSG:4326 Equirectangular), and performs in-place uint8 array scaling.
     """
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
@@ -55,24 +54,12 @@ def process_grib_to_array(grib_path, parameter):
             longitude=(((ds.longitude + 180) % 360) - 180)
         ).sortby('longitude')
 
-    # Clip latitudes to Web Mercator map limits
-    ds = ds.sel(latitude=slice(85.051129, -85.051129))
-
     # Select dynamic parameter variable safely
     target_var = parameter if parameter in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
-    # Reproject WGS84 -> Web Mercator (EPSG:3857) with 100% full cubic resolution
-    data_array.rio.set_spatial_dims(x_dim="longitude", y_dim="latitude", inplace=True)
-    data_array.rio.write_crs("EPSG:4326", inplace=True)
-
-    mercator_data = data_array.rio.reproject(
-        "EPSG:3857",
-        resampling=Resampling.cubic
-    )
-
-    # Extract raw numpy array
-    arr = np.squeeze(mercator_data.values)
+    # 🌟 Extract raw numpy array in full EPSG:4326 Equirectangular grid (+90°N to -90°S)
+    arr = np.squeeze(data_array.values)
     ds.close()
 
     # Fast in-place memory normalization (0 allocations)
