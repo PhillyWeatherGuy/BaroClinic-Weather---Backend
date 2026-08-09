@@ -23,8 +23,9 @@ OUTPUT_DIST_DIR    = "run_conus"
 MAX_FORECAST_HOURS = 360              
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
-TEMP_MIN_K = 210.0  # ~ -81.67°F
-TEMP_MAX_K = 330.0  # ~  134.33°F
+# 🌟 Exact Kelvin bounds matching Colab scale (-70.0°F to +130.0°F)
+TEMP_MIN_K = 216.4833  # Exact -70.0°F
+TEMP_MAX_K = 327.5944  # Exact +130.0°F
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
 MAX_TEXTURE_SIZE = 4096 
@@ -58,7 +59,7 @@ def process_grib_to_array(grib_path, parameter):
     target_var = parameter if parameter in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
-    # 🌟 Extract raw numpy array in full EPSG:4326 Equirectangular grid (+90°N to -90°S)
+    # Extract raw numpy array in full EPSG:4326 Equirectangular grid (+90°N to -90°S)
     arr = np.squeeze(data_array.values)
     ds.close()
 
@@ -278,7 +279,7 @@ def run_master_pipeline():
         "parameter": PARAMETER,
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
-        "init_time": init_time_iso,  # Frontend reads this to compute exact valid times!
+        "init_time": init_time_iso,
         "type": "spritesheet_chunked",
         "total_frames": len(steps_written),
         "frame_width": frame_w,
