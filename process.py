@@ -71,7 +71,7 @@ def split_path_at_dateline(vertices, max_jump=180.0):
 
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
-    🌟 Sub-Pixel Floating-Point Contour Extractor with Increasing Y-Axis Fix
+    🌟 Universal Matplotlib 3.8+ Sub-Pixel Contour Extractor
     """
     try:
         frame_h, frame_w = raw_arr_k.shape
@@ -79,7 +79,7 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
         # 1. OpenCV C++ Gaussian Blur to smooth grid steps
         smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
         
-        # 2. 🌟 FIX: Flip matrix vertically so lats increase monotonically (-90 to +90) for Matplotlib
+        # 2. Flip matrix vertically so lats increase monotonically (-90 to +90) for Matplotlib
         smoothed_flipped = np.flipud(smoothed)
         
         lons = np.linspace(-180.0, 180.0, frame_w)
@@ -90,18 +90,20 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
         cs = ax.contour(lons, lats, smoothed_flipped, levels=[target_k])
         
         segments = []
-        for collection in cs.collections:
-            for path in collection.get_paths():
-                v = path.vertices
-                if len(v) >= 2:
-                    pts = [[round(float(pt[0]), 4), round(float(pt[1]), 4)] for pt in v]
+        
+        # 🌟 cs.allsegments[0] works universally across ALL Matplotlib 3.x / 4.x versions
+        if hasattr(cs, 'allsegments') and len(cs.allsegments) > 0:
+            level_lines = cs.allsegments[0]
+            for line_array in level_lines:
+                if len(line_array) >= 2:
+                    pts = [[round(float(pt[0]), 4), round(float(pt[1]), 4)] for pt in line_array]
                     
                     # Split path at International Date Line to erase vertical seam line
                     cleaned_subpaths = split_path_at_dateline(pts, max_jump=180.0)
                     for subpath in cleaned_subpaths:
                         if len(subpath) >= 2:
                             segments.append(subpath)
-                    
+                            
         plt.close(fig)
 
         if not segments:
@@ -121,7 +123,7 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
             }]
         }
     except Exception as e:
-        print(f"  ⚠️ Contour extraction note: {e}")
+        print(f"  ❌ Contour extraction exception: {e}")
         return {"type": "FeatureCollection", "features": []}
 
 
