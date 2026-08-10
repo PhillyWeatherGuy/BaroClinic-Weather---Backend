@@ -71,20 +71,23 @@ def split_path_at_dateline(vertices, max_jump=180.0):
 
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
-    🌟 Sub-Pixel Floating-Point Contour Extractor with Anti-Meridian Seam Fix
+    🌟 Sub-Pixel Floating-Point Contour Extractor with Increasing Y-Axis Fix
     """
     try:
         frame_h, frame_w = raw_arr_k.shape
         
-        # 1. OpenCV C++ Gaussian Blur to eliminate grid steps
+        # 1. OpenCV C++ Gaussian Blur to smooth grid steps
         smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
         
+        # 2. 🌟 FIX: Flip matrix vertically so lats increase monotonically (-90 to +90) for Matplotlib
+        smoothed_flipped = np.flipud(smoothed)
+        
         lons = np.linspace(-180.0, 180.0, frame_w)
-        lats = np.linspace(90.0, -90.0, frame_h)
+        lats = np.linspace(-90.0, 90.0, frame_h)  # Strictly increasing!
             
-        # 2. Extract true sub-pixel floating-point isolines
+        # 3. Extract sub-pixel floating-point isolines
         fig, ax = plt.subplots(figsize=(1, 1))
-        cs = ax.contour(lons, lats, smoothed, levels=[target_k])
+        cs = ax.contour(lons, lats, smoothed_flipped, levels=[target_k])
         
         segments = []
         for collection in cs.collections:
@@ -93,7 +96,7 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
                 if len(v) >= 2:
                     pts = [[round(float(pt[0]), 4), round(float(pt[1]), 4)] for pt in v]
                     
-                    # 🌟 Split path at International Date Line to erase vertical seam line
+                    # Split path at International Date Line to erase vertical seam line
                     cleaned_subpaths = split_path_at_dateline(pts, max_jump=180.0)
                     for subpath in cleaned_subpaths:
                         if len(subpath) >= 2:
