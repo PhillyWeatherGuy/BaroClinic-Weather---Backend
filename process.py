@@ -13,6 +13,12 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 
+# 🌟 Headless Matplotlib + SciPy Gaussian Filter for Sub-Pixel Smooth Contours
+from scipy.ndimage import gaussian_filter
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 # Enable multi-threaded GDAL reprojection globally
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -36,28 +42,30 @@ MAX_CONCURRENT_WORKERS = 8
 
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
-    🌟 C++ Fast Contour Extractor (<1ms execution time via OpenCV)
-    Extracts 32°F (273.15K) isolines directly from raw float Kelvin array.
+    🌟 Sub-Pixel Floating-Point Contour Extractor
+    Uses Gaussian filtering + Matplotlib C-engine for silky-smooth isoline curves.
     """
     frame_h, frame_w = raw_arr_k.shape
     
-    # Binary threshold at 32°F (273.15 Kelvin)
-    binary_mask = (raw_arr_k >= target_k).astype(np.uint8) * 255
+    # 1. Apply Gaussian Filter smoothing to raw float Kelvin matrix (eliminates grid noise)
+    smoothed = gaussian_filter(raw_arr_k, sigma=1.2)
     
-    # C++ OpenCV Contour Finder
-    contours, _ = cv2.findContours(binary_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_TC89_KCOS)
+    lons = np.linspace(-180.0, 180.0, frame_w)
+    lats = np.linspace(90.0, -90.0, frame_h)
+        
+    # 2. Extract true sub-pixel floating-point isolines
+    fig, ax = plt.subplots(figsize=(1, 1))
+    cs = ax.contour(lons, lats, smoothed, levels=[target_k])
     
     segments = []
-    for cnt in contours:
-        if len(cnt) < 3:
-            continue
-        pts = []
-        for pt in cnt:
-            px, py = pt[0]
-            lng = -180.0 + (px / max(1, frame_w - 1)) * 360.0
-            lat = 90.0 - (py / max(1, frame_h - 1)) * 180.0
-            pts.append([round(float(lng), 4), round(float(lat), 4)])
-        segments.append(pts)
+    for collection in cs.collections:
+        for path in collection.get_paths():
+            v = path.vertices
+            if len(v) >= 3:
+                pts = [[round(float(pt[0]), 4), round(float(pt[1]), 4)] for pt in v]
+                segments.append(pts)
+                
+    plt.close(fig)
 
     if not segments:
         return {"type": "FeatureCollection", "features": []}
@@ -106,7 +114,7 @@ def process_grib_to_array(grib_path, parameter):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    # 🌟 Extract 32°F Vector Contour JSON directly from raw 32-bit float matrix (<1ms)
+    # 🌟 Extract sub-pixel smooth 32°F Vector Contour JSON directly from raw 32-bit float matrix
     contour_geojson = extract_contour_geojson(raw_arr_k, target_k=273.15)
 
     # In-place uint8 memory normalization for WebGL texture atlas
