@@ -42,11 +42,11 @@ MAX_CONCURRENT_WORKERS = 8
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
     🌟 Sub-Pixel Floating-Point Contour Extractor
-    Uses OpenCV Gaussian filtering + Matplotlib C-engine for silky-smooth isoline curves.
+    Uses OpenCV C++ Gaussian filtering + Matplotlib C-engine for silky-smooth isoline curves.
     """
     frame_h, frame_w = raw_arr_k.shape
     
-    # 1. OpenCV C++ Gaussian Filter smoothing (eliminates grid noise without needing scipy)
+    # 1. OpenCV C++ Gaussian Filter smoothing (Zero extra scipy dependencies!)
     smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
     
     lons = np.linspace(-180.0, 180.0, frame_w)
