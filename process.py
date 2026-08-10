@@ -13,11 +13,10 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 
-# 🌟 Thread-Safe Isolated Matplotlib Figure Engine
+# 🌟 Headless Matplotlib for Sub-Pixel Smooth Contours
 import matplotlib
 matplotlib.use('Agg')
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg
+import matplotlib.pyplot as plt
 
 # Enable multi-threaded GDAL reprojection globally
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
@@ -40,61 +39,71 @@ MAX_TEXTURE_SIZE = 4096
 MAX_CONCURRENT_WORKERS = 8
 
 
+def split_path_at_dateline(vertices, max_jump=180.0):
+    """
+    🌟 International Date Line Seam Fix
+    Splits a contour line whenever consecutive points jump across the 180° meridian,
+    preventing straight vertical/horizontal seam lines across the Pacific Ocean.
+    """
+    if len(vertices) < 2:
+        return []
+
+    split_paths = []
+    current_path = [vertices[0]]
+
+    for i in range(1, len(vertices)):
+        prev_pt = vertices[i - 1]
+        curr_pt = vertices[i]
+
+        # If longitude jumps across the 180° Date Line boundary, split the line
+        if abs(curr_pt[0] - prev_pt[0]) > max_jump:
+            if len(current_path) >= 2:
+                split_paths.append(current_path)
+            current_path = [curr_pt]
+        else:
+            current_path.append(curr_pt)
+
+    if len(current_path) >= 2:
+        split_paths.append(current_path)
+
+    return split_paths
+
+
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
-    🌟 Global Cyclic Sub-Pixel Contour Extractor
-    Uses cyclic column wrapping to seamlessly cross the 180° Anti-Meridian
-    without drawing vertical Date-Line border seams!
+    🌟 Sub-Pixel Floating-Point Contour Extractor with Anti-Meridian Seam Fix
     """
     try:
         frame_h, frame_w = raw_arr_k.shape
         
-        # 1. OpenCV C++ Gaussian Blur to smooth grid steps
+        # 1. OpenCV C++ Gaussian Blur to eliminate grid steps
         smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
-        smoothed_flipped = np.flipud(smoothed)
         
-        # 2. 🌟 Add 1 cyclic column to wrap longitudes smoothly from -180° to +180.25°
-        smoothed_cyclic = np.hstack([smoothed_flipped, smoothed_flipped[:, :1]])
-        
-        lon_step = 360.0 / frame_w
-        lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
-        lats = np.linspace(-90.0, 90.0, frame_h)  # Strictly increasing!
+        lons = np.linspace(-180.0, 180.0, frame_w)
+        lats = np.linspace(90.0, -90.0, frame_h)
             
-        # 3. Extract sub-pixel floating-point isolines
-        fig = Figure(figsize=(1, 1))
-        canvas = FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111)
-        
-        cs = ax.contour(lons, lats, smoothed_cyclic, levels=[target_k])
+        # 2. Extract true sub-pixel floating-point isolines
+        fig, ax = plt.subplots(figsize=(1, 1))
+        cs = ax.contour(lons, lats, smoothed, levels=[target_k])
         
         segments = []
-        
-        if hasattr(cs, 'allsegments') and len(cs.allsegments) > 0:
-            level_lines = cs.allsegments[0]
-            for line_array in level_lines:
-                if len(line_array) >= 2:
-                    pts = []
-                    for pt in line_array:
-                        lng = float(pt[0])
-                        lat = float(pt[1])
-                        if lng > 180.0:
-                            lng = 180.0
-                        pts.append([round(lng, 4), round(lat, 4)])
+        for collection in cs.collections:
+            for path in collection.get_paths():
+                v = path.vertices
+                if len(v) >= 2:
+                    pts = [[round(float(pt[0]), 4), round(float(pt[1]), 4)] for pt in v]
                     
-                    # 🌟 Filter out fake border lines sitting on exact -180.0 / +180.0 margin
-                    all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
-                    all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
+                    # 🌟 Split path at International Date Line to erase vertical seam line
+                    cleaned_subpaths = split_path_at_dateline(pts, max_jump=180.0)
+                    for subpath in cleaned_subpaths:
+                        if len(subpath) >= 2:
+                            segments.append(subpath)
                     
-                    if not all_on_left and not all_on_right:
-                        segments.append(pts)
-                            
-        fig.clear()
+        plt.close(fig)
 
         if not segments:
-            print("  ⚠️ Note: 0 contour segments generated.")
             return {"type": "FeatureCollection", "features": []}
 
-        print(f"  ✨ Generated {len(segments)} smooth 32°F contour segments")
         return {
             "type": "FeatureCollection",
             "features": [{
@@ -109,7 +118,7 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
             }]
         }
     except Exception as e:
-        print(f"  ❌ Contour extraction exception: {e}")
+        print(f"  ⚠️ Contour extraction note: {e}")
         return {"type": "FeatureCollection", "features": []}
 
 
