@@ -13,8 +13,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 
-# 🌟 Headless Matplotlib + SciPy Gaussian Filter for Sub-Pixel Smooth Contours
-from scipy.ndimage import gaussian_filter
+# 🌟 Headless Matplotlib for Sub-Pixel Smooth Contours
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -43,12 +42,12 @@ MAX_CONCURRENT_WORKERS = 8
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
     🌟 Sub-Pixel Floating-Point Contour Extractor
-    Uses Gaussian filtering + Matplotlib C-engine for silky-smooth isoline curves.
+    Uses OpenCV Gaussian filtering + Matplotlib C-engine for silky-smooth isoline curves.
     """
     frame_h, frame_w = raw_arr_k.shape
     
-    # 1. Apply Gaussian Filter smoothing to raw float Kelvin matrix (eliminates grid noise)
-    smoothed = gaussian_filter(raw_arr_k, sigma=1.2)
+    # 1. OpenCV C++ Gaussian Filter smoothing (eliminates grid noise without needing scipy)
+    smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
     
     lons = np.linspace(-180.0, 180.0, frame_w)
     lats = np.linspace(90.0, -90.0, frame_h)
@@ -62,6 +61,7 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
         for path in collection.get_paths():
             v = path.vertices
             if len(v) >= 3:
+                # Round coordinates to 4 decimal places for lightweight JSON payload
                 pts = [[round(float(pt[0]), 4), round(float(pt[1]), 4)] for pt in v]
                 segments.append(pts)
                 
