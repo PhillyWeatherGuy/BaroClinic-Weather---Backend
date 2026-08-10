@@ -13,6 +13,11 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 
+# 🌟 Headless Matplotlib for Sub-Pixel Smooth Contours
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
 # Enable multi-threaded GDAL reprojection globally
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -34,50 +39,67 @@ MAX_TEXTURE_SIZE = 4096
 MAX_CONCURRENT_WORKERS = 8
 
 
+def split_path_at_dateline(vertices, max_jump=180.0):
+    """
+    🌟 International Date Line Seam Fix
+    Splits a contour line whenever consecutive points jump across the 180° meridian,
+    preventing straight vertical/horizontal seam lines across the Pacific Ocean.
+    """
+    if len(vertices) < 2:
+        return []
+
+    split_paths = []
+    current_path = [vertices[0]]
+
+    for i in range(1, len(vertices)):
+        prev_pt = vertices[i - 1]
+        curr_pt = vertices[i]
+
+        # If longitude jumps across the 180° Date Line boundary, split the line
+        if abs(curr_pt[0] - prev_pt[0]) > max_jump:
+            if len(current_path) >= 2:
+                split_paths.append(current_path)
+            current_path = [curr_pt]
+        else:
+            current_path.append(curr_pt)
+
+    if len(current_path) >= 2:
+        split_paths.append(current_path)
+
+    return split_paths
+
+
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
-    🌟 Thread-Safe C++ Smooth Contour Extractor (100% Thread-Safe)
-    Uses OpenCV C++ Gaussian Blur + Chaikin Spline Curve Smoothing.
+    🌟 Sub-Pixel Floating-Point Contour Extractor with Anti-Meridian Seam Fix
     """
     try:
         frame_h, frame_w = raw_arr_k.shape
         
-        # 1. Thread-safe C++ Gaussian Blur to eliminate grid steps
-        smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (7, 7), 1.5)
+        # 1. OpenCV C++ Gaussian Blur to eliminate grid steps
+        smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
         
-        # 2. Binary mask at 32°F
-        binary_mask = (smoothed >= target_k).astype(np.uint8) * 255
-        
-        # 3. Thread-safe C++ Contour Finder
-        contours, _ = cv2.findContours(binary_mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        lons = np.linspace(-180.0, 180.0, frame_w)
+        lats = np.linspace(90.0, -90.0, frame_h)
+            
+        # 2. Extract true sub-pixel floating-point isolines
+        fig, ax = plt.subplots(figsize=(1, 1))
+        cs = ax.contour(lons, lats, smoothed, levels=[target_k])
         
         segments = []
-        for cnt in contours:
-            if len(cnt) < 5:
-                continue
-            
-            pts = []
-            for pt in cnt:
-                px, py = pt[0]
-                lng = -180.0 + (px / max(1, frame_w - 1)) * 360.0
-                lat = 90.0 - (py / max(1, frame_h - 1)) * 180.0
-                pts.append([round(float(lng), 4), round(float(lat), 4)])
-            
-            # 🌟 Chaikin curve smoothing across point list
-            if len(pts) >= 4:
-                smoothed_pts = pts
-                for _ in range(2):  # 2 passes of smoothing
-                    next_pts = [smoothed_pts[0]]
-                    for i in range(len(smoothed_pts) - 1):
-                        p0, p1 = smoothed_pts[i], smoothed_pts[i + 1]
-                        q = [0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]]
-                        r = [0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]]
-                        next_pts.extend([q, r])
-                    next_pts.append(smoothed_pts[-1])
-                    smoothed_pts = next_pts
-                pts = [[round(p[0], 4), round(p[1], 4)] for p in smoothed_pts]
-
-            segments.append(pts)
+        for collection in cs.collections:
+            for path in collection.get_paths():
+                v = path.vertices
+                if len(v) >= 2:
+                    pts = [[round(float(pt[0]), 4), round(float(pt[1]), 4)] for pt in v]
+                    
+                    # 🌟 Split path at International Date Line to erase vertical seam line
+                    cleaned_subpaths = split_path_at_dateline(pts, max_jump=180.0)
+                    for subpath in cleaned_subpaths:
+                        if len(subpath) >= 2:
+                            segments.append(subpath)
+                    
+        plt.close(fig)
 
         if not segments:
             return {"type": "FeatureCollection", "features": []}
@@ -129,7 +151,7 @@ def process_grib_to_array(grib_path, parameter):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    # 🌟 Extract 32°F Vector Contour JSON safely (<1ms thread-safe C++)
+    # 🌟 Extract sub-pixel smooth 32°F Vector Contour JSON safely
     contour_geojson = extract_contour_geojson(raw_arr_k, target_k=273.15)
 
     # In-place uint8 memory normalization for WebGL texture atlas
