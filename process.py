@@ -27,7 +27,7 @@ MAX_FORECAST_HOURS = 360
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 # 🌟 Exact Kelvin bounds matching Colab scale (-70.0°F to +130.0°F)
-TEMP_MIN_K = 199.8167  # Exact -100.00
+TEMP_MIN_K = 216.4833  # Exact -100.00
 TEMP_MAX_K = 327.5944  # Exact +130.0°F
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
