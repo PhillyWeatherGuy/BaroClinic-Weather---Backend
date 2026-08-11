@@ -73,8 +73,7 @@ def split_path_at_dateline(vertices, max_jump=180.0):
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
     🌟 Global Cyclic Sub-Pixel Contour Extractor
-    Uses cyclic column wrapping to seamlessly cross the 180° Anti-Meridian
-    without drawing vertical Date-Line border seams!
+    Uses Matplotlib C-engine with canvas.draw() to extract smooth isolines.
     """
     try:
         frame_h, frame_w = raw_arr_k.shape
@@ -90,12 +89,15 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
         lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
         lats = np.linspace(-90.0, 90.0, frame_h)  # Strictly increasing!
             
-        # 3. Extract sub-pixel floating-point isolines
+        # 3. Isolated Figure & Canvas
         fig = Figure(figsize=(1, 1))
         canvas = FigureCanvasAgg(fig)
         ax = fig.add_subplot(111)
         
         cs = ax.contour(lons, lats, smoothed_cyclic, levels=[target_k])
+        
+        # 🌟 CRITICAL FIX: Trigger Matplotlib C-contour computation pass!
+        canvas.draw()
         
         segments = []
         
@@ -121,8 +123,10 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
         fig.clear()
 
         if not segments:
+            print("  ⚠️ Note: 0 contour segments generated.")
             return {"type": "FeatureCollection", "features": []}
 
+        print(f"  ✨ Generated {len(segments)} smooth 32°F contour segments")
         return {
             "type": "FeatureCollection",
             "features": [{
@@ -170,7 +174,7 @@ def process_grib_to_array(grib_path, parameter):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    # Extract sub-pixel smooth 32°F Vector Contour JSON safely
+    # 🌟 Extract sub-pixel smooth 32°F Vector Contour JSON safely
     contour_geojson = extract_contour_geojson(raw_arr_k, target_k=273.15)
 
     # In-place uint8 memory normalization for WebGL texture atlas
@@ -298,11 +302,10 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         if os.path.isfile(os.path.join(folder_path, fname))
     ]
 
-    # Separate assets from manifests
     asset_files = [f for f in all_files if not f.endswith('manifest.json')]
     manifest_files = [f for f in all_files if f.endswith('manifest.json')]
 
-    # 1. Upload PNG textures & Master Contour JSON FIRST
+    # 1. Upload textures & Master Contour JSON FIRST
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         futures = [
             executor.submit(upload_single_file, s3_client, bucket_name, os.path.join(folder_path, fname), fname)
@@ -314,7 +317,6 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(upload_single_file, s3_client, bucket_name, os.path.join(folder_path, fname), fname)
-            for fpath in [os.path.join(folder_path, fname) for fname in manifest_files]
             for fname in manifest_files
         ]
         concurrent.futures.wait(futures)
@@ -375,7 +377,7 @@ def run_master_pipeline():
         print("❌ No frames were processed. Exiting pipeline.")
         return
 
-    # 🌟 Save 1 single Master Contour JSON containing all forecast steps for this run
+    # 🌟 Save 1 single Master Contour JSON containing all forecast steps
     master_contours = {
         "model": MODEL_NAME,
         "parameter": PARAMETER,
@@ -384,17 +386,15 @@ def run_master_pipeline():
         "steps": {str(step): contours_dict[step] for step in sorted_steps if step in contours_dict and contours_dict[step]}
     }
 
-    # 1. Run-specific master contour file (e.g. ecmwf_2t_20260810_06z_contours.json)
     run_contour_filename = f"{MODEL_NAME}_{PARAMETER}_{target_date}_{CHOSEN_RUN.lower()}z_contours.json"
     with open(os.path.join(OUTPUT_DIST_DIR, run_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
-    # 2. Latest default reference master contour file (e.g. ecmwf_2t_contours.json)
     latest_contour_filename = f"{MODEL_NAME}_{PARAMETER}_contours.json"
     with open(os.path.join(OUTPUT_DIST_DIR, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
-    print(f"  📄 Saved 1 Master Contour JSON with {len(master_contours['steps'])} forecast steps: {latest_contour_filename}")
+    print(f"  📄 Saved Master Contour JSON with {len(master_contours['steps'])} populated forecast steps")
 
     chunks, frame_w, frame_h = build_spritesheet_chunks(
         frame_arrays, 
@@ -438,7 +438,7 @@ def run_master_pipeline():
             json.dump(manifest, f, indent=2)
         print(f"  📄 Saved manifest: {m_fname}")
 
-    print(f"\n🎉 Pipeline Finished! Spritesheet, 1 Master Contour JSON, and manifests ready in {OUTPUT_DIST_DIR}/")
+    print(f"\n🎉 Pipeline Finished! Spritesheets, Master Contour JSON, and manifests ready in {OUTPUT_DIST_DIR}/")
 
     upload_to_b2_parallel(OUTPUT_DIST_DIR)
     
