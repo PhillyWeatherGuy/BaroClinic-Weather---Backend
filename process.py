@@ -13,11 +13,8 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 
-# 🌟 Thread-Safe Isolated Matplotlib Figure Engine
-import matplotlib
-matplotlib.use('Agg')
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_agg import FigureCanvasAgg
+# 🌟 Standalone C++ Contour Engine (Powers Matplotlib without Figure/Canvas clipping)
+import contourpy
 
 # Enable multi-threaded GDAL reprojection globally
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
@@ -72,8 +69,8 @@ def split_path_at_dateline(vertices, max_jump=180.0):
 
 def extract_contour_geojson(raw_arr_k, target_k=273.15):
     """
-    🌟 Global Cyclic Sub-Pixel Contour Extractor
-    Uses Matplotlib C-engine with canvas.draw() to extract smooth isolines.
+    🌟 ContourPy C++ Sub-Pixel Contour Extractor
+    Direct C++ isoline extraction without Figure/Canvas clipping overhead.
     """
     try:
         frame_h, frame_w = raw_arr_k.shape
@@ -89,38 +86,27 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
         lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
         lats = np.linspace(-90.0, 90.0, frame_h)  # Strictly increasing!
             
-        # 3. Isolated Figure & Canvas
-        fig = Figure(figsize=(1, 1))
-        canvas = FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111)
-        
-        cs = ax.contour(lons, lats, smoothed_cyclic, levels=[target_k])
-        
-        # 🌟 CRITICAL FIX: Trigger Matplotlib C-contour computation pass!
-        canvas.draw()
+        # 3. 🌟 Direct C++ Contour Generation (0.1ms)
+        cont_gen = contourpy.contour_generator(x=lons, y=lats, z=smoothed_cyclic)
+        lines = cont_gen.lines(target_k)
         
         segments = []
-        
-        if hasattr(cs, 'allsegments') and len(cs.allsegments) > 0:
-            level_lines = cs.allsegments[0]
-            for line_array in level_lines:
-                if len(line_array) >= 2:
-                    pts = []
-                    for pt in line_array:
-                        lng = float(pt[0])
-                        lat = float(pt[1])
-                        if lng > 180.0:
-                            lng = 180.0
-                        pts.append([round(lng, 4), round(lat, 4)])
-                    
-                    # Filter out fake border lines sitting on exact -180.0 / +180.0 margin
-                    all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
-                    all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
-                    
-                    if not all_on_left and not all_on_right:
-                        segments.append(pts)
-                            
-        fig.clear()
+        for line_array in lines:
+            if len(line_array) >= 2:
+                pts = []
+                for pt in line_array:
+                    lng = float(pt[0])
+                    lat = float(pt[1])
+                    if lng > 180.0:
+                        lng = 180.0
+                    pts.append([round(lng, 4), round(lat, 4)])
+                
+                # Filter out fake border lines sitting on exact -180.0 / +180.0 margin
+                all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
+                all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
+                
+                if not all_on_left and not all_on_right:
+                    segments.append(pts)
 
         if not segments:
             print("  ⚠️ Note: 0 contour segments generated.")
@@ -377,13 +363,19 @@ def run_master_pipeline():
         print("❌ No frames were processed. Exiting pipeline.")
         return
 
-    # 🌟 Save 1 single Master Contour JSON containing all forecast steps
+    # 🌟 Save 1 single Master Contour JSON containing populated forecast steps
+    populated_steps = {
+        str(step): contours_dict[step] 
+        for step in sorted_steps 
+        if step in contours_dict and contours_dict[step] and len(contours_dict[step].get("features", [])) > 0
+    }
+
     master_contours = {
         "model": MODEL_NAME,
         "parameter": PARAMETER,
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
-        "steps": {str(step): contours_dict[step] for step in sorted_steps if step in contours_dict and contours_dict[step]}
+        "steps": populated_steps
     }
 
     run_contour_filename = f"{MODEL_NAME}_{PARAMETER}_{target_date}_{CHOSEN_RUN.lower()}z_contours.json"
@@ -394,7 +386,7 @@ def run_master_pipeline():
     with open(os.path.join(OUTPUT_DIST_DIR, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
-    print(f"  📄 Saved Master Contour JSON with {len(master_contours['steps'])} populated forecast steps")
+    print(f"  📄 Saved Master Contour JSON with {len(populated_steps)} feature-populated forecast steps")
 
     chunks, frame_w, frame_h = build_spritesheet_chunks(
         frame_arrays, 
