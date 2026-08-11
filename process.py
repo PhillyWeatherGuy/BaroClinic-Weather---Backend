@@ -252,14 +252,18 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, parameter,
 
 
 def upload_single_file(s3_client, bucket_name, filepath, filename):
+    """
+    🌟 Fast Direct Upload via put_object() (0 Class C Metadata Check API calls!)
+    """
     content_type = "application/json" if filename.endswith(".json") else "image/png"
     try:
-        s3_client.upload_file(
-            filepath,
-            bucket_name,
-            filename,
-            ExtraArgs={'ContentType': content_type}
-        )
+        with open(filepath, 'rb') as f:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=filename,
+                Body=f,
+                ContentType=content_type
+            )
         print(f"  ✅ Uploaded to B2: {filename}")
     except Exception as e:
         print(f"  ❌ Failed to upload {filename}: {e}")
