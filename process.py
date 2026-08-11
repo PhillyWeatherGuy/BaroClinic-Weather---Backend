@@ -13,6 +13,12 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 
+# 🌟 Thread-Safe Isolated Matplotlib Figure Engine
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+
 # Enable multi-threaded GDAL reprojection globally
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -34,10 +40,111 @@ MAX_TEXTURE_SIZE = 4096
 MAX_CONCURRENT_WORKERS = 8
 
 
+def split_path_at_dateline(vertices, max_jump=180.0):
+    """
+    🌟 International Date Line Seam Fix
+    Splits a contour line whenever consecutive points jump across the 180° meridian,
+    preventing straight vertical/horizontal seam lines across the Pacific Ocean.
+    """
+    if len(vertices) < 2:
+        return []
+
+    split_paths = []
+    current_path = [vertices[0]]
+
+    for i in range(1, len(vertices)):
+        prev_pt = vertices[i - 1]
+        curr_pt = vertices[i]
+
+        # If longitude jumps across the 180° Date Line boundary, split the line
+        if abs(curr_pt[0] - prev_pt[0]) > max_jump:
+            if len(current_path) >= 2:
+                split_paths.append(current_path)
+            current_path = [curr_pt]
+        else:
+            current_path.append(curr_pt)
+
+    if len(current_path) >= 2:
+        split_paths.append(current_path)
+
+    return split_paths
+
+
+def extract_contour_geojson(raw_arr_k, target_k=273.15):
+    """
+    🌟 Global Cyclic Sub-Pixel Contour Extractor
+    Uses cyclic column wrapping to seamlessly cross the 180° Anti-Meridian
+    without drawing vertical Date-Line border seams!
+    """
+    try:
+        frame_h, frame_w = raw_arr_k.shape
+        
+        # 1. OpenCV C++ Gaussian Blur to smooth grid steps
+        smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
+        smoothed_flipped = np.flipud(smoothed)
+        
+        # 2. Add 1 cyclic column to wrap longitudes smoothly from -180° to +180.25°
+        smoothed_cyclic = np.hstack([smoothed_flipped, smoothed_flipped[:, :1]])
+        
+        lon_step = 360.0 / frame_w
+        lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
+        lats = np.linspace(-90.0, 90.0, frame_h)  # Strictly increasing!
+            
+        # 3. Extract sub-pixel floating-point isolines
+        fig = Figure(figsize=(1, 1))
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+        
+        cs = ax.contour(lons, lats, smoothed_cyclic, levels=[target_k])
+        
+        segments = []
+        
+        if hasattr(cs, 'allsegments') and len(cs.allsegments) > 0:
+            level_lines = cs.allsegments[0]
+            for line_array in level_lines:
+                if len(line_array) >= 2:
+                    pts = []
+                    for pt in line_array:
+                        lng = float(pt[0])
+                        lat = float(pt[1])
+                        if lng > 180.0:
+                            lng = 180.0
+                        pts.append([round(lng, 4), round(lat, 4)])
+                    
+                    # Filter out fake border lines sitting on exact -180.0 / +180.0 margin
+                    all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
+                    all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
+                    
+                    if not all_on_left and not all_on_right:
+                        segments.append(pts)
+                            
+        fig.clear()
+
+        if not segments:
+            return {"type": "FeatureCollection", "features": []}
+
+        return {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {"type": "MultiLineString", "coordinates": segments},
+                "properties": {
+                    "name": "32°F Freezing Line",
+                    "color": "#4169E1",
+                    "width": 2.0,
+                    "opacity": 0.95
+                }
+            }]
+        }
+    except Exception as e:
+        print(f"  ❌ Contour extraction exception: {e}")
+        return {"type": "FeatureCollection", "features": []}
+
+
 def process_grib_to_array(grib_path, parameter):
     """
     Reads a GRIB file, normalizes coordinates, retains full 90°N to -90°S latitude 
-    coverage (EPSG:4326 Equirectangular), and performs in-place uint8 array scaling.
+    coverage (EPSG:4326 Equirectangular), extracts vector contours, and scales uint8 array.
     """
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
@@ -59,23 +166,26 @@ def process_grib_to_array(grib_path, parameter):
     target_var = parameter if parameter in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
-    # Extract raw numpy array in full EPSG:4326 Equirectangular grid (+90°N to -90°S)
-    arr = np.squeeze(data_array.values)
+    # Extract raw numpy array in Kelvin (32-bit float precision)
+    raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    # Fast in-place memory normalization (0 allocations)
-    arr = np.nan_to_num(arr, copy=False, nan=TEMP_MIN_K)
+    # Extract sub-pixel smooth 32°F Vector Contour JSON safely
+    contour_geojson = extract_contour_geojson(raw_arr_k, target_k=273.15)
+
+    # In-place uint8 memory normalization for WebGL texture atlas
+    arr = np.nan_to_num(raw_arr_k, copy=False, nan=TEMP_MIN_K)
     np.clip(arr, TEMP_MIN_K, TEMP_MAX_K, out=arr)
     arr -= TEMP_MIN_K
     arr /= (TEMP_MAX_K - TEMP_MIN_K)
     arr *= 255.0
 
-    return arr.astype(np.uint8)
+    return arr.astype(np.uint8), contour_geojson
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step, parameter, model_name):
     """
-    Worker task: Downloads a single forecast step GRIB file, converts it to array,
+    Worker task: Downloads a single forecast step GRIB file, converts it to array + contour JSON,
     and cleans up local GRIB storage immediately.
     """
     grib_file = f"{model_name}_{parameter}_{step:03d}.grib2"
@@ -85,22 +195,22 @@ def fetch_and_process_step(client, target_date, chosen_run, step, parameter, mod
             type="fc", levtype="sfc", param=[parameter], target=grib_file
         )
         if os.path.exists(grib_file):
-            frame_arr = process_grib_to_array(grib_file, parameter)
+            frame_arr, contour_geojson = process_grib_to_array(grib_file, parameter)
             try: os.remove(grib_file)
             except Exception: pass
             print(f"  ⚡ Processed F{step:03d}")
-            return step, frame_arr
+            return step, frame_arr, contour_geojson
     except Exception as e:
         print(f"  ❌ Error processing F{step:03d}: {e}")
         if os.path.exists(grib_file):
             try: os.remove(grib_file)
             except Exception: pass
-    return step, None
+    return step, None, None
 
 
 def build_spritesheet_chunks(frame_arrays, steps_written, model_name, parameter, target_date, chosen_run):
     """
-    Packs in-memory 2D uint8 numpy arrays into 8192x8192 WebGL texture atlases.
+    Packs in-memory 2D uint8 numpy arrays into 4096x4096 WebGL texture atlases.
     """
     if not frame_arrays:
         return [], 0, 0
@@ -134,7 +244,6 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, parameter,
 
             spritesheet_arr[y_start:y_end, x_start:x_end] = arr
 
-        # 🌟 Structured naming: model_parameter_date_run_chunk.png
         spritesheet_filename = f"{model_name}_{parameter}_{target_date}_{chosen_run}z_spritesheet_{chunk_idx}.png"
         
         chunks.append({
@@ -184,16 +293,29 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         aws_secret_access_key=app_key
     )
 
-    files_to_upload = [
-        (os.path.join(folder_path, fname), fname)
-        for fname in os.listdir(folder_path)
+    all_files = [
+        fname for fname in os.listdir(folder_path)
         if os.path.isfile(os.path.join(folder_path, fname))
     ]
 
+    # Separate assets from manifests
+    asset_files = [f for f in all_files if not f.endswith('manifest.json')]
+    manifest_files = [f for f in all_files if f.endswith('manifest.json')]
+
+    # 1. Upload PNG textures & Master Contour JSON FIRST
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(upload_single_file, s3_client, bucket_name, os.path.join(folder_path, fname), fname)
+            for fname in asset_files
+        ]
+        concurrent.futures.wait(futures)
+
+    # 2. Upload manifests LAST once all assets are live on B2
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
-            executor.submit(upload_single_file, s3_client, bucket_name, fpath, fname)
-            for fpath, fname in files_to_upload
+            executor.submit(upload_single_file, s3_client, bucket_name, os.path.join(folder_path, fname), fname)
+            for fpath in [os.path.join(folder_path, fname) for fname in manifest_files]
+            for fname in manifest_files
         ]
         concurrent.futures.wait(futures)
 
@@ -218,7 +340,6 @@ def run_master_pipeline():
         CHOSEN_RUN = "12"
         target_date = (now_utc - datetime.timedelta(days=1)).strftime("%Y%m%d")
 
-    # 🌟 Formatted ISO Initialization Timestamp (Crucial for frontend clock calculation)
     init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
     print(f"🌍 Model: {MODEL_NAME} | Param: {PARAMETER} | Run: {CHOSEN_RUN}z on {target_date}")
@@ -231,6 +352,7 @@ def run_master_pipeline():
     os.makedirs(OUTPUT_DIST_DIR, exist_ok=True)
 
     results = {}
+    contours_dict = {}
 
     print(f"⚡ Starting multi-threaded pipeline ({MAX_CONCURRENT_WORKERS} workers)...")
     
@@ -240,9 +362,10 @@ def run_master_pipeline():
             for step in FORECAST_STEPS
         }
         for future in concurrent.futures.as_completed(future_to_step):
-            step, arr = future.result()
+            step, arr, contour_json = future.result()
             if arr is not None:
                 results[step] = arr
+                contours_dict[step] = contour_json
 
     sorted_steps = sorted(results.keys())
     frame_arrays = [results[s] for s in sorted_steps]
@@ -251,6 +374,27 @@ def run_master_pipeline():
     if not frame_arrays:
         print("❌ No frames were processed. Exiting pipeline.")
         return
+
+    # 🌟 Save 1 single Master Contour JSON containing all forecast steps for this run
+    master_contours = {
+        "model": MODEL_NAME,
+        "parameter": PARAMETER,
+        "run": f"{CHOSEN_RUN}z",
+        "date": target_date,
+        "steps": {str(step): contours_dict[step] for step in sorted_steps if step in contours_dict and contours_dict[step]}
+    }
+
+    # 1. Run-specific master contour file (e.g. ecmwf_2t_20260810_06z_contours.json)
+    run_contour_filename = f"{MODEL_NAME}_{PARAMETER}_{target_date}_{CHOSEN_RUN.lower()}z_contours.json"
+    with open(os.path.join(OUTPUT_DIST_DIR, run_contour_filename), 'w') as f:
+        json.dump(master_contours, f)
+
+    # 2. Latest default reference master contour file (e.g. ecmwf_2t_contours.json)
+    latest_contour_filename = f"{MODEL_NAME}_{PARAMETER}_contours.json"
+    with open(os.path.join(OUTPUT_DIST_DIR, latest_contour_filename), 'w') as f:
+        json.dump(master_contours, f)
+
+    print(f"  📄 Saved 1 Master Contour JSON with {len(master_contours['steps'])} forecast steps: {latest_contour_filename}")
 
     chunks, frame_w, frame_h = build_spritesheet_chunks(
         frame_arrays, 
@@ -263,17 +407,14 @@ def run_master_pipeline():
 
     manifest_chunks = []
     
-    # Save PNG chunks via OpenCV native C++ writer (compress_level=3)
     for chunk in chunks:
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(OUTPUT_DIST_DIR, filename)
         
         cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
-        
         manifest_chunks.append(chunk["manifest_data"])
-        print(f"  💾 Saved spritesheet via cv2: {filename}")
+        print(f"  💾 Saved spritesheet: {filename}")
 
-    # 🌟 Clean, structured manifest JSON with explicit model metadata & init_time
     manifest = {
         "model": MODEL_NAME,
         "parameter": PARAMETER,
@@ -290,7 +431,6 @@ def run_master_pipeline():
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
     }
 
-    # 🌟 Save BOTH manifest.json (latest default) and ecmwf_YYYYMMDD_HHz_manifest.json (historical run copy)
     run_manifest_filename = f"{MODEL_NAME}_{target_date}_{CHOSEN_RUN.lower()}z_manifest.json"
     for m_fname in ["manifest.json", run_manifest_filename]:
         m_path = os.path.join(OUTPUT_DIST_DIR, m_fname)
@@ -298,7 +438,7 @@ def run_master_pipeline():
             json.dump(manifest, f, indent=2)
         print(f"  📄 Saved manifest: {m_fname}")
 
-    print(f"\n🎉 Pipeline Finished! {len(chunks)} spritesheet(s) and manifests ready in {OUTPUT_DIST_DIR}/")
+    print(f"\n🎉 Pipeline Finished! Spritesheet, 1 Master Contour JSON, and manifests ready in {OUTPUT_DIST_DIR}/")
 
     upload_to_b2_parallel(OUTPUT_DIST_DIR)
     
