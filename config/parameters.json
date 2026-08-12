@@ -26,6 +26,26 @@
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{date}_{run}z_manifest.json"
       }
+    },
+    "tp": {
+      "id": "tp",
+      "name": "Total Accumulated Precipitation",
+      "grib_param": "tp",
+      "levtype": "sfc",
+      "type": "fc",
+      "unit": "in",
+      "min_val": 0.0,
+      "max_val": 0.762,
+      "display_min": 0.0,
+      "display_max": 30.0,
+      "contours": [],
+      "filename_patterns": {
+        "grib": "{model}_{param}_{step:03d}.grib2",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json"
+      }
     }
   }
 }
