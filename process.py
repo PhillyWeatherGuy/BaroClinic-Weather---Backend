@@ -26,15 +26,26 @@ OUTPUT_DIST_DIR    = "run_conus"
 MAX_FORECAST_HOURS = 360              
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
-# 🌟 Exact Kelvin bounds matching Colab scale (-70.0°F to +130.0°F)
-TEMP_MIN_K = 216.4833  # Exact -100.00
-TEMP_MAX_K = 327.5944  # Exact +130.0°F
-
 # Universally safe WebGL max texture size for desktop & mobile GPUs
 MAX_TEXTURE_SIZE = 4096 
 
 # Increased to 8 to maximize network pipeline throughput
 MAX_CONCURRENT_WORKERS = 8
+
+CONFIG_FILE_PATH = os.path.join("config", "parameters.json")
+
+
+def load_parameter_config(param_key="2t"):
+    """
+    Loads parameter configuration from config/parameters.json
+    """
+    if os.path.exists(CONFIG_FILE_PATH):
+        with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            params = data.get("parameters", {})
+            if param_key in params:
+                return params[param_key]
+    raise FileNotFoundError(f"Parameter '{param_key}' not found in {CONFIG_FILE_PATH}")
 
 
 def split_path_at_dateline(vertices, max_jump=180.0):
@@ -67,11 +78,14 @@ def split_path_at_dateline(vertices, max_jump=180.0):
     return split_paths
 
 
-def extract_contour_geojson(raw_arr_k, target_k=273.15):
+def extract_contour_geojson(raw_arr_k, contours_config=None):
     """
     🌟 ContourPy C++ Sub-Pixel Contour Extractor
-    Direct C++ isoline extraction without Figure/Canvas clipping overhead.
+    Direct C++ isoline extraction reading targets dynamically from config.
     """
+    if not contours_config:
+        return {"type": "FeatureCollection", "features": []}
+
     try:
         frame_h, frame_w = raw_arr_k.shape
         
@@ -86,52 +100,58 @@ def extract_contour_geojson(raw_arr_k, target_k=273.15):
         lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
         lats = np.linspace(-90.0, 90.0, frame_h)  # Strictly increasing!
             
-        # 3. 🌟 Direct C++ Contour Generation (0.1ms)
         cont_gen = contourpy.contour_generator(x=lons, y=lats, z=smoothed_cyclic)
-        lines = cont_gen.lines(target_k)
-        
-        segments = []
-        for line_array in lines:
-            if len(line_array) >= 2:
-                pts = []
-                for pt in line_array:
-                    lng = float(pt[0])
-                    lat = float(pt[1])
-                    if lng > 180.0:
-                        lng = 180.0
-                    pts.append([round(lng, 4), round(lat, 4)])
-                
-                # Filter out fake border lines sitting on exact -180.0 / +180.0 margin
-                all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
-                all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
-                
-                if not all_on_left and not all_on_right:
-                    segments.append(pts)
+        features = []
 
-        if not segments:
-            print("  ⚠️ Note: 0 contour segments generated.")
+        # Loop through all configured contour levels for this parameter
+        for c_def in contours_config:
+            target_val = c_def["target"]
+            lines = cont_gen.lines(target_val)
+            
+            segments = []
+            for line_array in lines:
+                if len(line_array) >= 2:
+                    pts = []
+                    for pt in line_array:
+                        lng = float(pt[0])
+                        lat = float(pt[1])
+                        if lng > 180.0:
+                            lng = 180.0
+                        pts.append([round(lng, 4), round(lat, 4)])
+                    
+                    all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
+                    all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
+                    
+                    if not all_on_left and not all_on_right:
+                        segments.append(pts)
+
+            if segments:
+                features.append({
+                    "type": "Feature",
+                    "geometry": {"type": "MultiLineString", "coordinates": segments},
+                    "properties": {
+                        "name": c_def["name"],
+                        "color": c_def["color"],
+                        "width": c_def["width"],
+                        "opacity": c_def["opacity"]
+                    }
+                })
+
+        if not features:
+            print("  ⚠️ Note: 0 contour feature sets generated.")
             return {"type": "FeatureCollection", "features": []}
 
-        print(f"  ✨ Generated {len(segments)} smooth 32°F contour segments")
+        print(f"  ✨ Generated {len(features)} contour feature set(s)")
         return {
             "type": "FeatureCollection",
-            "features": [{
-                "type": "Feature",
-                "geometry": {"type": "MultiLineString", "coordinates": segments},
-                "properties": {
-                    "name": "32°F Freezing Line",
-                    "color": "#4169E1",
-                    "width": 2.0,
-                    "opacity": 0.95
-                }
-            }]
+            "features": features
         }
     except Exception as e:
         print(f"  ❌ Contour extraction exception: {e}")
         return {"type": "FeatureCollection", "features": []}
 
 
-def process_grib_to_array(grib_path, parameter):
+def process_grib_to_array(grib_path, param_config):
     """
     Reads a GRIB file, normalizes coordinates, retains full 90°N to -90°S latitude 
     coverage (EPSG:4326 Equirectangular), extracts vector contours, and scales uint8 array.
@@ -153,39 +173,50 @@ def process_grib_to_array(grib_path, parameter):
         ).sortby('longitude')
 
     # Select dynamic parameter variable safely
-    target_var = parameter if parameter in ds else list(ds.data_vars)[0]
+    grib_var = param_config["grib_param"]
+    target_var = grib_var if grib_var in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
-    # Extract raw numpy array in Kelvin (32-bit float precision)
+    # Extract raw numpy array
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    # 🌟 Extract sub-pixel smooth 32°F Vector Contour JSON safely
-    contour_geojson = extract_contour_geojson(raw_arr_k, target_k=273.15)
+    # Extract sub-pixel vector contours using config
+    contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
 
-    # In-place uint8 memory normalization for WebGL texture atlas
-    arr = np.nan_to_num(raw_arr_k, copy=False, nan=TEMP_MIN_K)
-    np.clip(arr, TEMP_MIN_K, TEMP_MAX_K, out=arr)
-    arr -= TEMP_MIN_K
-    arr /= (TEMP_MAX_K - TEMP_MIN_K)
+    # In-place uint8 memory normalization using parameter min/max
+    min_val = param_config["min_val"]
+    max_val = param_config["max_val"]
+
+    arr = np.nan_to_num(raw_arr_k, copy=False, nan=min_val)
+    np.clip(arr, min_val, max_val, out=arr)
+    arr -= min_val
+    arr /= (max_val - min_val)
     arr *= 255.0
 
     return arr.astype(np.uint8), contour_geojson
 
 
-def fetch_and_process_step(client, target_date, chosen_run, step, parameter, model_name):
+def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
     """
     Worker task: Downloads a single forecast step GRIB file, converts it to array + contour JSON,
     and cleans up local GRIB storage immediately.
     """
-    grib_file = f"{model_name}_{parameter}_{step:03d}.grib2"
+    patterns = param_config["filename_patterns"]
+    grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
+
     try:
         client.retrieve(
-            date=target_date, time=int(chosen_run), step=step,
-            type="fc", levtype="sfc", param=[parameter], target=grib_file
+            date=target_date, 
+            time=int(chosen_run), 
+            step=step,
+            type=param_config["type"], 
+            levtype=param_config["levtype"], 
+            param=[param_config["grib_param"]], 
+            target=grib_file
         )
         if os.path.exists(grib_file):
-            frame_arr, contour_geojson = process_grib_to_array(grib_file, parameter)
+            frame_arr, contour_geojson = process_grib_to_array(grib_file, param_config)
             try: os.remove(grib_file)
             except Exception: pass
             print(f"  ⚡ Processed F{step:03d}")
@@ -198,7 +229,7 @@ def fetch_and_process_step(client, target_date, chosen_run, step, parameter, mod
     return step, None, None
 
 
-def build_spritesheet_chunks(frame_arrays, steps_written, model_name, parameter, target_date, chosen_run):
+def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
     """
     Packs in-memory 2D uint8 numpy arrays into 4096x4096 WebGL texture atlases.
     """
@@ -212,6 +243,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, parameter,
     frames_per_sheet = max_cols * max_rows
 
     chunks = []
+    patterns = param_config["filename_patterns"]
     
     for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
         chunk_frames = frame_arrays[i:i + frames_per_sheet]
@@ -234,7 +266,13 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, parameter,
 
             spritesheet_arr[y_start:y_end, x_start:x_end] = arr
 
-        spritesheet_filename = f"{model_name}_{parameter}_{target_date}_{chosen_run}z_spritesheet_{chunk_idx}.png"
+        spritesheet_filename = patterns["spritesheet"].format(
+            model=model_name,
+            param=param_config["id"],
+            date=target_date,
+            run=chosen_run,
+            chunk_idx=chunk_idx
+        )
         
         chunks.append({
             "array": spritesheet_arr,
@@ -312,9 +350,10 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         concurrent.futures.wait(futures)
 
 
-def run_master_pipeline():
+def run_master_pipeline(selected_param_key="2t"):
     MODEL_NAME = "ecmwf"
-    PARAMETER = "2t"
+    param_config = load_parameter_config(selected_param_key)
+    patterns = param_config["filename_patterns"]
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     current_hour = now_utc.hour
@@ -334,9 +373,9 @@ def run_master_pipeline():
 
     init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
-    print(f"🌍 Model: {MODEL_NAME} | Param: {PARAMETER} | Run: {CHOSEN_RUN}z on {target_date}")
+    print(f"🌍 Model: {MODEL_NAME} | Param: {param_config['name']} ({param_config['id']}) | Run: {CHOSEN_RUN}z on {target_date}")
 
-    for f in glob.glob(f"{MODEL_NAME}_{PARAMETER}_*.grib2"):
+    for f in glob.glob(f"{MODEL_NAME}_{param_config['id']}_*.grib2"):
         try: os.remove(f)
         except Exception: pass
 
@@ -350,7 +389,7 @@ def run_master_pipeline():
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         future_to_step = {
-            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step, PARAMETER, MODEL_NAME): step
+            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME): step
             for step in FORECAST_STEPS
         }
         for future in concurrent.futures.as_completed(future_to_step):
@@ -367,7 +406,7 @@ def run_master_pipeline():
         print("❌ No frames were processed. Exiting pipeline.")
         return
 
-    # 🌟 Save 1 single Master Contour JSON containing populated forecast steps
+    # 🌟 Save Master Contour JSON containing populated forecast steps
     populated_steps = {
         str(step): contours_dict[step] 
         for step in sorted_steps 
@@ -376,17 +415,21 @@ def run_master_pipeline():
 
     master_contours = {
         "model": MODEL_NAME,
-        "parameter": PARAMETER,
+        "parameter": param_config["id"],
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
         "steps": populated_steps
     }
 
-    run_contour_filename = f"{MODEL_NAME}_{PARAMETER}_{target_date}_{CHOSEN_RUN.lower()}z_contours.json"
+    run_contour_filename = patterns["run_contours"].format(
+        model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
+    )
     with open(os.path.join(OUTPUT_DIST_DIR, run_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
-    latest_contour_filename = f"{MODEL_NAME}_{PARAMETER}_contours.json"
+    latest_contour_filename = patterns["latest_contours"].format(
+        model=MODEL_NAME, param=param_config["id"]
+    )
     with open(os.path.join(OUTPUT_DIST_DIR, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
@@ -396,7 +439,7 @@ def run_master_pipeline():
         frame_arrays, 
         steps_written, 
         model_name=MODEL_NAME, 
-        parameter=PARAMETER,
+        param_config=param_config,
         target_date=target_date, 
         chosen_run=CHOSEN_RUN
     )
@@ -413,7 +456,7 @@ def run_master_pipeline():
 
     manifest = {
         "model": MODEL_NAME,
-        "parameter": PARAMETER,
+        "parameter": param_config["id"],
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
         "init_time": init_time_iso,
@@ -421,13 +464,15 @@ def run_master_pipeline():
         "total_frames": len(steps_written),
         "frame_width": frame_w,
         "frame_height": frame_h,
-        "temp_min_k": TEMP_MIN_K,
-        "temp_max_k": TEMP_MAX_K,
+        "temp_min_k": param_config["min_val"],
+        "temp_max_k": param_config["max_val"],
         "chunks": manifest_chunks,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
     }
 
-    run_manifest_filename = f"{MODEL_NAME}_{target_date}_{CHOSEN_RUN.lower()}z_manifest.json"
+    run_manifest_filename = patterns["run_manifest"].format(
+        model=MODEL_NAME, date=target_date, run=CHOSEN_RUN.lower()
+    )
     for m_fname in ["manifest.json", run_manifest_filename]:
         m_path = os.path.join(OUTPUT_DIST_DIR, m_fname)
         with open(m_path, 'w') as f:
@@ -447,4 +492,4 @@ def run_master_pipeline():
 
 
 if __name__ == "__main__":
-    run_master_pipeline()
+    run_master_pipeline("2t")
