@@ -434,8 +434,9 @@ def run_master_pipeline(selected_param_key="2t"):
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
     }
 
+    # 🌟 FIXED: Added param=param_config["id"] here
     run_manifest_filename = patterns["run_manifest"].format(
-        model=MODEL_NAME, date=target_date, run=CHOSEN_RUN.lower()
+        model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
     
     for m_fname in ["manifest.json", run_manifest_filename]:
@@ -467,8 +468,6 @@ if __name__ == "__main__":
 
     print(f"🚀 Launching Pipeline for Parameters: {target_params}")
     
-    # 🌟 Capped at min(len(target_params), MAX_CONCURRENT_PARAMS)
-    # Processes max 2 parameters at a time, moving to the next ones automatically!
     max_param_workers = min(len(target_params), MAX_CONCURRENT_PARAMS)
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_param_workers) as executor:
