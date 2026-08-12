@@ -1,0 +1,31 @@
+{
+  "parameters": {
+    "2t": {
+      "id": "2t",
+      "name": "2m Temperature",
+      "grib_param": "2t",
+      "levtype": "sfc",
+      "type": "fc",
+      "unit": "°F",
+      "min_val": 216.4833,
+      "max_val": 327.5944,
+      "contours": [
+        {
+          "id": "freezing_32f",
+          "target": 273.15,
+          "name": "32°F Freezing Line",
+          "color": "#4169E1",
+          "width": 2.0,
+          "opacity": 0.95
+        }
+      ],
+      "filename_patterns": {
+        "grib": "{model}_{param}_{step:03d}.grib2",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{date}_{run}z_manifest.json"
+      }
+    }
+  }
+}
