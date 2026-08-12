@@ -4,6 +4,7 @@ import datetime
 import glob
 import json
 import math
+import sys
 import concurrent.futures
 import numpy as np
 import xarray as xr
@@ -13,7 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 
-# 🌟 Standalone C++ Contour Engine (Powers Matplotlib without Figure/Canvas clipping)
+# 🌟 Standalone C++ Contour Engine
 import contourpy
 
 # Enable multi-threaded GDAL reprojection globally
@@ -22,15 +23,17 @@ os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
-OUTPUT_DIST_DIR    = "run_conus"      
 MAX_FORECAST_HOURS = 360              
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
 MAX_TEXTURE_SIZE = 4096 
 
-# Increased to 8 to maximize network pipeline throughput
-MAX_CONCURRENT_WORKERS = 8
+# Worker thread count per parameter download/processing pipeline
+MAX_CONCURRENT_WORKERS = 4
+
+# Maximum number of parameters to process simultaneously
+MAX_CONCURRENT_PARAMS = 2
 
 CONFIG_FILE_PATH = os.path.join("config", "parameters.json")
 
@@ -49,11 +52,6 @@ def load_parameter_config(param_key="2t"):
 
 
 def split_path_at_dateline(vertices, max_jump=180.0):
-    """
-    🌟 International Date Line Seam Fix
-    Splits a contour line whenever consecutive points jump across the 180° meridian,
-    preventing straight vertical/horizontal seam lines across the Pacific Ocean.
-    """
     if len(vertices) < 2:
         return []
 
@@ -64,7 +62,6 @@ def split_path_at_dateline(vertices, max_jump=180.0):
         prev_pt = vertices[i - 1]
         curr_pt = vertices[i]
 
-        # If longitude jumps across the 180° Date Line boundary, split the line
         if abs(curr_pt[0] - prev_pt[0]) > max_jump:
             if len(current_path) >= 2:
                 split_paths.append(current_path)
@@ -79,31 +76,24 @@ def split_path_at_dateline(vertices, max_jump=180.0):
 
 
 def extract_contour_geojson(raw_arr_k, contours_config=None):
-    """
-    🌟 ContourPy C++ Sub-Pixel Contour Extractor
-    Direct C++ isoline extraction reading targets dynamically from config.
-    """
     if not contours_config:
         return {"type": "FeatureCollection", "features": []}
 
     try:
         frame_h, frame_w = raw_arr_k.shape
         
-        # 1. OpenCV C++ Gaussian Blur to smooth grid steps
         smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
         smoothed_flipped = np.flipud(smoothed)
         
-        # 2. Add 1 cyclic column to wrap longitudes smoothly from -180° to +180.25°
         smoothed_cyclic = np.hstack([smoothed_flipped, smoothed_flipped[:, :1]])
         
         lon_step = 360.0 / frame_w
         lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
-        lats = np.linspace(-90.0, 90.0, frame_h)  # Strictly increasing!
+        lats = np.linspace(-90.0, 90.0, frame_h)
             
         cont_gen = contourpy.contour_generator(x=lons, y=lats, z=smoothed_cyclic)
         features = []
 
-        # Loop through all configured contour levels for this parameter
         for c_def in contours_config:
             target_val = c_def["target"]
             lines = cont_gen.lines(target_val)
@@ -138,7 +128,7 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
                 })
 
         if not features:
-            print("  ⚠️ Note: 0 contour feature sets generated.")
+            print(f"  ⚠️ Note: 0 contour feature sets generated.")
             return {"type": "FeatureCollection", "features": []}
 
         print(f"  ✨ Generated {len(features)} contour feature set(s)")
@@ -152,10 +142,6 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
 
 
 def process_grib_to_array(grib_path, param_config):
-    """
-    Reads a GRIB file, normalizes coordinates, retains full 90°N to -90°S latitude 
-    coverage (EPSG:4326 Equirectangular), extracts vector contours, and scales uint8 array.
-    """
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
     if 'lon' in ds.coords:
@@ -163,28 +149,22 @@ def process_grib_to_array(grib_path, param_config):
     if 'lat' in ds.coords:
         ds = ds.rename({'lat': 'latitude'})
 
-    # Ensure latitudes run North to South (+90 to -90)
     ds = ds.sortby('latitude', ascending=False)
     
-    # Normalize longitudes to wrap cleanly from -180 to 180 degrees
     if ds.longitude.max() > 180:
         ds = ds.assign_coords(
             longitude=(((ds.longitude + 180) % 360) - 180)
         ).sortby('longitude')
 
-    # Select dynamic parameter variable safely
     grib_var = param_config["grib_param"]
     target_var = grib_var if grib_var in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
-    # Extract raw numpy array
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    # Extract sub-pixel vector contours using config
     contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
 
-    # In-place uint8 memory normalization using parameter min/max
     min_val = param_config["min_val"]
     max_val = param_config["max_val"]
 
@@ -198,10 +178,6 @@ def process_grib_to_array(grib_path, param_config):
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
-    """
-    Worker task: Downloads a single forecast step GRIB file, converts it to array + contour JSON,
-    and cleans up local GRIB storage immediately.
-    """
     patterns = param_config["filename_patterns"]
     grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
 
@@ -219,10 +195,10 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
             frame_arr, contour_geojson = process_grib_to_array(grib_file, param_config)
             try: os.remove(grib_file)
             except Exception: pass
-            print(f"  ⚡ Processed F{step:03d}")
+            print(f"  ⚡ [{param_config['id']}] Processed F{step:03d}")
             return step, frame_arr, contour_geojson
     except Exception as e:
-        print(f"  ❌ Error processing F{step:03d}: {e}")
+        print(f"  ❌ [{param_config['id']}] Error processing F{step:03d}: {e}")
         if os.path.exists(grib_file):
             try: os.remove(grib_file)
             except Exception: pass
@@ -230,9 +206,6 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
 
 
 def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
-    """
-    Packs in-memory 2D uint8 numpy arrays into 4096x4096 WebGL texture atlases.
-    """
     if not frame_arrays:
         return [], 0, 0
 
@@ -290,9 +263,6 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
 
 
 def upload_single_file(s3_client, bucket_name, filepath, filename):
-    """
-    🌟 Fast Direct Upload via put_object() (0 Class C Metadata Check API calls!)
-    """
     content_type = "application/json" if filename.endswith(".json") else "image/png"
     try:
         with open(filepath, 'rb') as f:
@@ -316,7 +286,7 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         print("⚠️ B2 Credentials not set in environment. Skipping cloud upload.")
         return
 
-    print("\n☁️ Uploading generated assets to Backblaze B2 concurrently...")
+    print(f"\n☁️ Uploading {folder_path} assets to Backblaze B2 concurrently...")
 
     s3_client = boto3.client(
         service_name='s3',
@@ -333,15 +303,13 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
     asset_files = [f for f in all_files if not f.endswith('manifest.json')]
     manifest_files = [f for f in all_files if f.endswith('manifest.json')]
 
-    # 1. Upload textures & Master Contour JSON FIRST
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         futures = [
             executor.submit(upload_single_file, s3_client, bucket_name, os.path.join(folder_path, fname), fname)
             for fname in asset_files
         ]
         concurrent.futures.wait(futures)
 
-    # 2. Upload manifests LAST once all assets are live on B2
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(upload_single_file, s3_client, bucket_name, os.path.join(folder_path, fname), fname)
@@ -354,6 +322,8 @@ def run_master_pipeline(selected_param_key="2t"):
     MODEL_NAME = "ecmwf"
     param_config = load_parameter_config(selected_param_key)
     patterns = param_config["filename_patterns"]
+
+    output_dist_dir = f"run_{param_config['id']}"
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     current_hour = now_utc.hour
@@ -373,20 +343,18 @@ def run_master_pipeline(selected_param_key="2t"):
 
     init_time_iso = f"{target_date[:4]}-{target_date[4:6]}-{target_date[6:]}T{CHOSEN_RUN}:00:00Z"
 
-    print(f"🌍 Model: {MODEL_NAME} | Param: {param_config['name']} ({param_config['id']}) | Run: {CHOSEN_RUN}z on {target_date}")
+    print(f"🌍 [{param_config['id']}] Model: {MODEL_NAME} | Param: {param_config['name']} | Run: {CHOSEN_RUN}z on {target_date}")
 
     for f in glob.glob(f"{MODEL_NAME}_{param_config['id']}_*.grib2"):
         try: os.remove(f)
         except Exception: pass
 
     client = Client(source="azure", model="ifs", resol="0p25")
-    os.makedirs(OUTPUT_DIST_DIR, exist_ok=True)
+    os.makedirs(output_dist_dir, exist_ok=True)
 
     results = {}
     contours_dict = {}
 
-    print(f"⚡ Starting multi-threaded pipeline ({MAX_CONCURRENT_WORKERS} workers)...")
-    
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         future_to_step = {
             executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME): step
@@ -403,10 +371,9 @@ def run_master_pipeline(selected_param_key="2t"):
     steps_written = sorted_steps
 
     if not frame_arrays:
-        print("❌ No frames were processed. Exiting pipeline.")
+        print(f"❌ [{param_config['id']}] No frames processed. Exiting pipeline.")
         return
 
-    # 🌟 Save Master Contour JSON containing populated forecast steps
     populated_steps = {
         str(step): contours_dict[step] 
         for step in sorted_steps 
@@ -424,16 +391,14 @@ def run_master_pipeline(selected_param_key="2t"):
     run_contour_filename = patterns["run_contours"].format(
         model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
-    with open(os.path.join(OUTPUT_DIST_DIR, run_contour_filename), 'w') as f:
+    with open(os.path.join(output_dist_dir, run_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
     latest_contour_filename = patterns["latest_contours"].format(
         model=MODEL_NAME, param=param_config["id"]
     )
-    with open(os.path.join(OUTPUT_DIST_DIR, latest_contour_filename), 'w') as f:
+    with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
-
-    print(f"  📄 Saved Master Contour JSON with {len(populated_steps)} feature-populated forecast steps")
 
     chunks, frame_w, frame_h = build_spritesheet_chunks(
         frame_arrays, 
@@ -448,11 +413,10 @@ def run_master_pipeline(selected_param_key="2t"):
     
     for chunk in chunks:
         filename = chunk["manifest_data"]["file"]
-        filepath = os.path.join(OUTPUT_DIST_DIR, filename)
+        filepath = os.path.join(output_dist_dir, filename)
         
         cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
         manifest_chunks.append(chunk["manifest_data"])
-        print(f"  💾 Saved spritesheet: {filename}")
 
     manifest = {
         "model": MODEL_NAME,
@@ -473,23 +437,48 @@ def run_master_pipeline(selected_param_key="2t"):
     run_manifest_filename = patterns["run_manifest"].format(
         model=MODEL_NAME, date=target_date, run=CHOSEN_RUN.lower()
     )
+    
     for m_fname in ["manifest.json", run_manifest_filename]:
-        m_path = os.path.join(OUTPUT_DIST_DIR, m_fname)
+        m_path = os.path.join(output_dist_dir, m_fname)
         with open(m_path, 'w') as f:
             json.dump(manifest, f, indent=2)
-        print(f"  📄 Saved manifest: {m_fname}")
 
-    print(f"\n🎉 Pipeline Finished! Spritesheets, Master Contour JSON, and manifests ready in {OUTPUT_DIST_DIR}/")
+    print(f"\n🎉 [{param_config['id']}] Assets ready in {output_dist_dir}/")
 
-    upload_to_b2_parallel(OUTPUT_DIST_DIR)
+    upload_to_b2_parallel(output_dist_dir)
     
-    print(f"\n🧹 Cleaning up: Deleting local {OUTPUT_DIST_DIR}/ folder...")
     try:
-        shutil.rmtree(OUTPUT_DIST_DIR)
-        print("  ✅ Cleanup complete. Workspace is spotless!")
+        shutil.rmtree(output_dist_dir)
+        print(f"  ✅ [{param_config['id']}] Cleanup complete.")
     except Exception as e:
-        print(f"  ❌ Failed to delete folder: {e}")
+        print(f"  ❌ [{param_config['id']}] Failed to delete temp directory: {e}")
 
 
 if __name__ == "__main__":
-    run_master_pipeline("2t")
+    if len(sys.argv) > 1:
+        target_params = sys.argv[1:]
+    else:
+        if os.path.exists(CONFIG_FILE_PATH):
+            with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                target_params = list(data.get("parameters", {}).keys())
+        else:
+            target_params = ["2t"]
+
+    print(f"🚀 Launching Pipeline for Parameters: {target_params}")
+    
+    # 🌟 Capped at min(len(target_params), MAX_CONCURRENT_PARAMS)
+    # Processes max 2 parameters at a time, moving to the next ones automatically!
+    max_param_workers = min(len(target_params), MAX_CONCURRENT_PARAMS)
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_param_workers) as executor:
+        futures = {executor.submit(run_master_pipeline, param): param for param in target_params}
+        for future in concurrent.futures.as_completed(futures):
+            param = futures[future]
+            try:
+                future.result()
+                print(f"✅ Finished parameter: {param}")
+            except Exception as e:
+                print(f"❌ Error processing parameter '{param}': {e}")
+
+    print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")
