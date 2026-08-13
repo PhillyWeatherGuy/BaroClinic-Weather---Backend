@@ -142,6 +142,10 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
 
 
 def process_grib_to_array(grib_path, param_config):
+    """
+    Reads a GRIB file, normalizes coordinates, retains full 90°N to -90°S latitude 
+    coverage (EPSG:4326 Equirectangular), extracts vector contours, and scales uint8 array.
+    """
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
     if 'lon' in ds.coords:
@@ -149,22 +153,26 @@ def process_grib_to_array(grib_path, param_config):
     if 'lat' in ds.coords:
         ds = ds.rename({'lat': 'latitude'})
 
+    # Ensure latitudes run North to South (+90 to -90)
     ds = ds.sortby('latitude', ascending=False)
-    
-    if ds.longitude.max() > 180:
-        ds = ds.assign_coords(
-            longitude=(((ds.longitude + 180) % 360) - 180)
-        ).sortby('longitude')
 
     grib_var = param_config["grib_param"]
     target_var = grib_var if grib_var in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
+    # Extract raw numpy array
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
+    # 🌟 ROCK-SOLID INTEGER ROLLING (Fixes 1-pixel horizontal shaking/jiggling bug!)
+    # Shifts 180°E (column 720) to Column 0 (left edge) with 0% floating-point jitter
+    if raw_arr_k.ndim == 2 and raw_arr_k.shape[1] == 1440:
+        raw_arr_k = np.roll(raw_arr_k, 720, axis=-1)
+
+    # Extract sub-pixel vector contours using config
     contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
 
+    # In-place uint8 memory normalization using parameter min/max
     min_val = param_config["min_val"]
     max_val = param_config["max_val"]
 
@@ -434,7 +442,6 @@ def run_master_pipeline(selected_param_key="2t"):
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
     }
 
-    # 🌟 FIXED: Added param=param_config["id"] here
     run_manifest_filename = patterns["run_manifest"].format(
         model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
