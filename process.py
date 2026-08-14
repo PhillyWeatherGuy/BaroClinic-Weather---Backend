@@ -155,13 +155,11 @@ def process_grib_to_array(grib_path, param_config):
             longitude=(((ds.longitude + 180) % 360) - 180)
         )
     
-    # Ensure coordinates are perfectly sorted before reindexing
     ds = ds.sortby('longitude')
     ds = ds.sortby('latitude', ascending=False)
 
-    # 🌟 THE ULTIMATE GRID LOCK
-    # Instead of trusting floating-point noise from GRIB metadata, 
-    # we mathematically force every single time step to lock onto this exact 1440x721 grid.
+    # 🌟 THE ULTIMATE GRID LOCK:
+    # Forces every forecast step to lock onto the exact same 1440x721 grid.
     MASTER_LATS = np.linspace(90.0, -90.0, 721)
     MASTER_LONS = np.linspace(-180.0, 179.75, 1440)
 
