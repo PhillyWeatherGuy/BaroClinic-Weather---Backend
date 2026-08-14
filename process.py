@@ -23,7 +23,7 @@ os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
-MAX_FORECAST_HOURS = 27              
+MAX_FORECAST_HOURS = 18              
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
@@ -217,7 +217,8 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
 
     frame_h, frame_w = frame_arrays[0].shape
     
-    max_cols = max(1, MAX_TEXTURE_SIZE // frame_w)
+    # 🌟 SINGLE-COLUMN ATLAS (Eliminates 2D zigzag row transition drift)
+    max_cols = 1
     max_rows = max(1, MAX_TEXTURE_SIZE // frame_h)
     frames_per_sheet = max_cols * max_rows
 
