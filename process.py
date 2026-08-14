@@ -23,7 +23,7 @@ os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
-MAX_FORECAST_HOURS = 24              
+MAX_FORECAST_HOURS = 27              
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
@@ -49,6 +49,30 @@ def load_parameter_config(param_key="2t"):
             if param_key in params:
                 return params[param_key]
     raise FileNotFoundError(f"Parameter '{param_key}' not found in {CONFIG_FILE_PATH}")
+
+
+def split_path_at_dateline(vertices, max_jump=180.0):
+    if len(vertices) < 2:
+        return []
+
+    split_paths = []
+    current_path = [vertices[0]]
+
+    for i in range(1, len(vertices)):
+        prev_pt = vertices[i - 1]
+        curr_pt = vertices[i]
+
+        if abs(curr_pt[0] - prev_pt[0]) > max_jump:
+            if len(current_path) >= 2:
+                split_paths.append(current_path)
+            current_path = [curr_pt]
+        else:
+            current_path.append(curr_pt)
+
+    if len(current_path) >= 2:
+        split_paths.append(current_path)
+
+    return split_paths
 
 
 def extract_contour_geojson(raw_arr_k, contours_config=None):
@@ -117,71 +141,49 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
         return {"type": "FeatureCollection", "features": []}
 
 
-def process_grib_to_array(grib_path, param_config, step, running_total=None):
+def process_grib_to_array(grib_path, param_config):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
-    if 'lon' in ds.coords:
-        ds = ds.rename({'lon': 'longitude'})
-    if 'lat' in ds.coords:
-        ds = ds.rename({'lat': 'latitude'})
-
-    if ds.longitude.max() > 180:
-        ds = ds.assign_coords(
-            longitude=(((ds.longitude + 180) % 360) - 180)
-        )
-    
-    ds = ds.sortby('longitude')
-    ds = ds.sortby('latitude', ascending=False)
-
-    # 🌟 MATHEMATICAL GRID LOCK
-    MASTER_LATS = np.linspace(90.0, -90.0, 721)
-    MASTER_LONS = np.linspace(-180.0, 179.75, 1440)
-
-    ds = ds.reindex(
-        latitude=MASTER_LATS, 
-        longitude=MASTER_LONS, 
-        method="nearest"
-    )
-
     grib_var = param_config["grib_param"]
     target_var = grib_var if grib_var in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
-    raw_arr_k = np.squeeze(data_array.values)
+    # Extract the raw 2D numpy array immediately to avoid xarray coordinate math
+    raw_arr = np.squeeze(data_array.values)
+    
+    # 🌟 1. Fix Latitude Drift (Ensure North to South physically)
+    lat_var = 'latitude' if 'latitude' in ds.coords else 'lat'
+    lats = ds[lat_var].values
+    if lats[0] < lats[-1]:  # If South to North, physically flip the array matrix
+        raw_arr = np.flip(raw_arr, axis=0)
+        
+    # 🌟 2. Fix Longitude Drift (Physical roll instead of xarray modulo sorting)
+    lon_var = 'longitude' if 'longitude' in ds.coords else 'lon'
+    lons = ds[lon_var].values
+    
+    # If it's a 0-360 grid (max > 180), physically roll it so -180 is on the left
+    if lons.max() > 180.0:
+        # Shift the array horizontally by exactly half its width (720 pixels for a 1440 grid)
+        shift_amount = len(lons) // 2
+        raw_arr = np.roll(raw_arr, shift=shift_amount, axis=1)
+
     ds.close()
 
-    # 🌟 THE ULTIMATE FIX: CUMULATIVE SUM FOR INTERVAL PRECIPITATION
-    if param_config["id"] == "tp":
-        # Force Step 0 to be completely blank (destroys junk initialization data)
-        if step == 0:
-            raw_arr_k = np.zeros_like(raw_arr_k)
-        
-        # Add the 3-hour interval rain to the ongoing storm total
-        if running_total is None:
-            running_total = raw_arr_k.copy()
-        else:
-            running_total += raw_arr_k
-        
-        raw_arr_k = running_total.copy()
-    else:
-        # For Temperature (2t), we don't cumulate it
-        running_total = None
-
-    contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
+    contour_geojson = extract_contour_geojson(raw_arr, param_config.get("contours", []))
 
     min_val = param_config["min_val"]
     max_val = param_config["max_val"]
 
-    arr = np.nan_to_num(raw_arr_k, copy=False, nan=min_val)
+    arr = np.nan_to_num(raw_arr, copy=False, nan=min_val)
     np.clip(arr, min_val, max_val, out=arr)
     arr -= min_val
     arr /= (max_val - min_val)
     arr *= 255.0
 
-    return arr.astype(np.uint8), contour_geojson, running_total
+    return arr.astype(np.uint8), contour_geojson
 
 
-def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name, running_total=None):
+def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
     patterns = param_config["filename_patterns"]
     grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
 
@@ -196,17 +198,17 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
             target=grib_file
         )
         if os.path.exists(grib_file):
-            frame_arr, contour_geojson, new_total = process_grib_to_array(grib_file, param_config, step, running_total)
+            frame_arr, contour_geojson = process_grib_to_array(grib_file, param_config)
             try: os.remove(grib_file)
             except Exception: pass
             print(f"  ⚡ [{param_config['id']}] Processed F{step:03d}")
-            return step, frame_arr, contour_geojson, new_total
+            return step, frame_arr, contour_geojson
     except Exception as e:
         print(f"  ❌ [{param_config['id']}] Error processing F{step:03d}: {e}")
         if os.path.exists(grib_file):
             try: os.remove(grib_file)
             except Exception: pass
-    return step, None, None, running_total
+    return step, None, None
 
 
 def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
@@ -359,12 +361,10 @@ def run_master_pipeline(selected_param_key="2t"):
     results = {}
     contours_dict = {}
 
-    running_total = None
-
-    # 🌟 STRICTLY SEQUENTIAL TO MAINTAIN RUNNING TOTAL
+    # 🌟 STRICTLY SEQUENTIAL TO PREVENT MEMORY COLLISIONS
     for step in FORECAST_STEPS:
-        s, arr, contour_json, running_total = fetch_and_process_step(
-            client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME, running_total
+        s, arr, contour_json = fetch_and_process_step(
+            client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME
         )
         if arr is not None:
             results[s] = arr
