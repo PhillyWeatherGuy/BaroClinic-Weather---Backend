@@ -180,10 +180,6 @@ def process_grib_to_array(grib_path, param_config):
     arr /= (max_val - min_val)
     arr *= 255.0
 
-    # 🎯 TEST ANCHOR: Draw a fixed 10x10 white square on Philadelphia (40°N, 75°W) on every frame
-    # Lat 40°N = pixel 200, Lon -75°W = pixel 420
-    arr[195:205, 415:425] = 255.0
-
     return arr.astype(np.uint8), contour_geojson
 
 
@@ -221,8 +217,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
 
     frame_h, frame_w = frame_arrays[0].shape
     
-    # 🌟 SINGLE-COLUMN ATLAS (Eliminates 2D zigzag row transition drift)
-    max_cols = 1
+    max_cols = max(1, MAX_TEXTURE_SIZE // frame_w)
     max_rows = max(1, MAX_TEXTURE_SIZE // frame_h)
     frames_per_sheet = max_cols * max_rows
 
