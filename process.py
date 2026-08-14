@@ -23,7 +23,7 @@ os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
-MAX_FORECAST_HOURS = 18              
+MAX_FORECAST_HOURS = 27              
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
@@ -179,6 +179,10 @@ def process_grib_to_array(grib_path, param_config):
     arr -= min_val
     arr /= (max_val - min_val)
     arr *= 255.0
+
+    # 🎯 TEST ANCHOR: Draw a fixed 10x10 white square on Philadelphia (40°N, 75°W) on every frame
+    # Lat 40°N = pixel 200, Lon -75°W = pixel 420
+    arr[195:205, 415:425] = 255.0
 
     return arr.astype(np.uint8), contour_geojson
 
