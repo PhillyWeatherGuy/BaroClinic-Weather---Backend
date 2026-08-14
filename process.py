@@ -355,16 +355,14 @@ def run_master_pipeline(selected_param_key="2t"):
     results = {}
     contours_dict = {}
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
-        future_to_step = {
-            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME): step
-            for step in FORECAST_STEPS
-        }
-        for future in concurrent.futures.as_completed(future_to_step):
-            step, arr, contour_json = future.result()
-            if arr is not None:
-                results[step] = arr
-                contours_dict[step] = contour_json
+    # 🌟 FIXED: Strictly sequential forecast step processing to eliminate ecCodes / cfgrib memory pointer collisions
+    for step in FORECAST_STEPS:
+        s, arr, contour_json = fetch_and_process_step(
+            client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME
+        )
+        if arr is not None:
+            results[s] = arr
+            contours_dict[s] = contour_json
 
     sorted_steps = sorted(results.keys())
     frame_arrays = [results[s] for s in sorted_steps]
@@ -434,7 +432,6 @@ def run_master_pipeline(selected_param_key="2t"):
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
     }
 
-    # 🌟 FIXED: Added param=param_config["id"] here
     run_manifest_filename = patterns["run_manifest"].format(
         model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
