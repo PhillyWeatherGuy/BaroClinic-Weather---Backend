@@ -23,7 +23,7 @@ os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 # ==============================================================================
 # CONFIGURATION & CONSTANTS
 # ==============================================================================
-MAX_FORECAST_HOURS = 27              
+MAX_FORECAST_HOURS = 12              
 FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 # Universally safe WebGL max texture size for desktop & mobile GPUs
@@ -217,53 +217,47 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
 
     frame_h, frame_w = frame_arrays[0].shape
     
-    max_cols = max(1, MAX_TEXTURE_SIZE // frame_w)
-    max_rows = max(1, MAX_TEXTURE_SIZE // frame_h)
-    frames_per_sheet = max_cols * max_rows
-
+    # 🌟 1 SINGLE HORIZONTAL ROW (Zero vertical rows)
+    num_frames = len(frame_arrays)
     chunks = []
     patterns = param_config["filename_patterns"]
     
-    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
-        chunk_frames = frame_arrays[i:i + frames_per_sheet]
-        chunk_steps = steps_written[i:i + frames_per_sheet]
-        
-        sheet_w = frame_w * max_cols
-        sheet_rows = math.ceil(len(chunk_frames) / max_cols)
-        sheet_h = frame_h * sheet_rows
-        
-        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
+    sheet_w = frame_w * num_frames
+    sheet_rows = 1
+    sheet_h = frame_h
+    
+    spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
 
-        for idx, arr in enumerate(chunk_frames):
-            col = idx % max_cols
-            row = idx // max_cols
+    for idx, arr in enumerate(frame_arrays):
+        col = idx
+        row = 0
 
-            y_start = row * frame_h
-            y_end = y_start + frame_h
-            x_start = col * frame_w
-            x_end = x_start + frame_w
+        y_start = 0
+        y_end = frame_h
+        x_start = col * frame_w
+        x_end = x_start + frame_w
 
-            spritesheet_arr[y_start:y_end, x_start:x_end] = arr
+        spritesheet_arr[y_start:y_end, x_start:x_end] = arr
 
-        spritesheet_filename = patterns["spritesheet"].format(
-            model=model_name,
-            param=param_config["id"],
-            date=target_date,
-            run=chosen_run,
-            chunk_idx=chunk_idx
-        )
-        
-        chunks.append({
-            "array": spritesheet_arr,
-            "manifest_data": {
-                "file": spritesheet_filename,
-                "forecast_steps": chunk_steps,
-                "columns": max_cols,
-                "rows": sheet_rows,
-                "sheet_width": sheet_w,
-                "sheet_height": sheet_h
-            }
-        })
+    spritesheet_filename = patterns["spritesheet"].format(
+        model=model_name,
+        param=param_config["id"],
+        date=target_date,
+        run=chosen_run,
+        chunk_idx=0
+    )
+    
+    chunks.append({
+        "array": spritesheet_arr,
+        "manifest_data": {
+            "file": spritesheet_filename,
+            "forecast_steps": steps_written,
+            "columns": num_frames,
+            "rows": 1,
+            "sheet_width": sheet_w,
+            "sheet_height": sheet_h
+        }
+    })
 
     return chunks, frame_w, frame_h
 
