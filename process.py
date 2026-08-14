@@ -149,19 +149,27 @@ def process_grib_to_array(grib_path, param_config):
     if 'lat' in ds.coords:
         ds = ds.rename({'lat': 'latitude'})
 
-    # 🌟 THE FIX: Round the coordinates to 4 decimal places before doing any math!
-    # This obliterates the microscopic floating-point noise that causes the 1-pixel shift.
-    ds = ds.assign_coords(
-        longitude=np.round(ds.longitude, 4), 
-        latitude=np.round(ds.latitude, 4)
-    )
-
-    ds = ds.sortby('latitude', ascending=False)
-    
+    # 1. Wrap Longitude to -180 -> +180
     if ds.longitude.max() > 180:
         ds = ds.assign_coords(
             longitude=(((ds.longitude + 180) % 360) - 180)
-        ).sortby('longitude')
+        )
+    
+    # Ensure coordinates are perfectly sorted before reindexing
+    ds = ds.sortby('longitude')
+    ds = ds.sortby('latitude', ascending=False)
+
+    # 🌟 THE ULTIMATE GRID LOCK
+    # Instead of trusting floating-point noise from GRIB metadata, 
+    # we mathematically force every single time step to lock onto this exact 1440x721 grid.
+    MASTER_LATS = np.linspace(90.0, -90.0, 721)
+    MASTER_LONS = np.linspace(-180.0, 179.75, 1440)
+
+    ds = ds.reindex(
+        latitude=MASTER_LATS, 
+        longitude=MASTER_LONS, 
+        method="nearest"
+    )
 
     grib_var = param_config["grib_param"]
     target_var = grib_var if grib_var in ds else list(ds.data_vars)[0]
@@ -341,7 +349,7 @@ def run_master_pipeline(selected_param_key="2t"):
         CHOSEN_RUN, target_date = "06", now_utc.strftime("%Y%m%d")
     elif current_hour >= 8:
         CHOSEN_RUN, target_date = "00", now_utc.strftime("%Y%m%d")
-    elif current_hour >= 1: # 🌟 FORCE 18z NOW to bust Cloudflare cache
+    elif current_hour >= 2:
         CHOSEN_RUN = "18"
         target_date = (now_utc - datetime.timedelta(days=1)).strftime("%Y%m%d")
     else:
@@ -362,7 +370,7 @@ def run_master_pipeline(selected_param_key="2t"):
     results = {}
     contours_dict = {}
 
-    # 🌟 FIXED: Strictly sequential forecast step processing
+    # 🌟 STRICTLY SEQUENTIAL TO PREVENT MEMORY COLLISIONS
     for step in FORECAST_STEPS:
         s, arr, contour_json = fetch_and_process_step(
             client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME
