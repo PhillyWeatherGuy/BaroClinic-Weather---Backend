@@ -13,26 +13,17 @@ from ecmwf.opendata import Client
 import rioxarray
 from rasterio.enums import Resampling
 import boto3
-
-# 🌟 Standalone C++ Contour Engine
 import contourpy
 
-# Enable multi-threaded GDAL reprojection globally
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
-# ==============================================================================
-# CONFIGURATION & CONSTANTS
-# ==============================================================================
-MAX_FORECAST_HOURS = 12              
-FORECAST_STEPS     = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
+MAX_FORECAST_HOURS = 360
+FORECAST_STEPS = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
-# Universally safe WebGL max texture size for desktop & mobile GPUs
-MAX_TEXTURE_SIZE = 4096 
+MAX_TEXTURE_SIZE = 4096
 
-# Worker thread count per parameter download/processing pipeline
 MAX_CONCURRENT_WORKERS = 4
 
-# Maximum number of parameters to process simultaneously
 MAX_CONCURRENT_PARAMS = 2
 
 CONFIG_FILE_PATH = os.path.join("config", "parameters.json")
@@ -144,37 +135,31 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
 def process_grib_to_array(grib_path, param_config):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
+    if 'lon' in ds.coords:
+        ds = ds.rename({'lon': 'longitude'})
+    if 'lat' in ds.coords:
+        ds = ds.rename({'lat': 'latitude'})
+
+    ds = ds.sortby('latitude', ascending=False)
+    
+    if ds.longitude.max() > 180:
+        ds = ds.assign_coords(
+            longitude=(((ds.longitude + 180) % 360) - 180)
+        ).sortby('longitude')
+
     grib_var = param_config["grib_param"]
     target_var = grib_var if grib_var in ds else list(ds.data_vars)[0]
     data_array = ds[target_var]
 
-    # Extract the raw 2D numpy array immediately to avoid xarray coordinate math
-    raw_arr = np.squeeze(data_array.values)
-    
-    # 🌟 1. Fix Latitude Drift (Ensure North to South physically)
-    lat_var = 'latitude' if 'latitude' in ds.coords else 'lat'
-    lats = ds[lat_var].values
-    if lats[0] < lats[-1]:  # If South to North, physically flip the array matrix
-        raw_arr = np.flip(raw_arr, axis=0)
-        
-    # 🌟 2. Fix Longitude Drift (Physical roll instead of xarray modulo sorting)
-    lon_var = 'longitude' if 'longitude' in ds.coords else 'lon'
-    lons = ds[lon_var].values
-    
-    # If it's a 0-360 grid (max > 180), physically roll it so -180 is on the left
-    if lons.max() > 180.0:
-        # Shift the array horizontally by exactly half its width (720 pixels for a 1440 grid)
-        shift_amount = len(lons) // 2
-        raw_arr = np.roll(raw_arr, shift=shift_amount, axis=1)
-
+    raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    contour_geojson = extract_contour_geojson(raw_arr, param_config.get("contours", []))
+    contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
 
     min_val = param_config["min_val"]
     max_val = param_config["max_val"]
 
-    arr = np.nan_to_num(raw_arr, copy=False, nan=min_val)
+    arr = np.nan_to_num(raw_arr_k, copy=False, nan=min_val)
     np.clip(arr, min_val, max_val, out=arr)
     arr -= min_val
     arr /= (max_val - min_val)
@@ -216,48 +201,46 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         return [], 0, 0
 
     frame_h, frame_w = frame_arrays[0].shape
-    
-    # 🌟 1 SINGLE HORIZONTAL ROW (Zero vertical rows)
-    num_frames = len(frame_arrays)
+    frames_per_sheet = 10  # 10 horizontal frames per chunk (14,400px x 721px)
+
     chunks = []
     patterns = param_config["filename_patterns"]
     
-    sheet_w = frame_w * num_frames
-    sheet_rows = 1
-    sheet_h = frame_h
-    
-    spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
+    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
+        chunk_frames = frame_arrays[i:i + frames_per_sheet]
+        chunk_steps = steps_written[i:i + frames_per_sheet]
+        
+        num_cols = len(chunk_frames)
+        sheet_w = frame_w * num_cols
+        sheet_rows = 1
+        sheet_h = frame_h
+        
+        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
 
-    for idx, arr in enumerate(frame_arrays):
-        col = idx
-        row = 0
+        for idx, arr in enumerate(chunk_frames):
+            x_start = idx * frame_w
+            x_end = x_start + frame_w
+            spritesheet_arr[0:frame_h, x_start:x_end] = arr
 
-        y_start = 0
-        y_end = frame_h
-        x_start = col * frame_w
-        x_end = x_start + frame_w
-
-        spritesheet_arr[y_start:y_end, x_start:x_end] = arr
-
-    spritesheet_filename = patterns["spritesheet"].format(
-        model=model_name,
-        param=param_config["id"],
-        date=target_date,
-        run=chosen_run,
-        chunk_idx=0
-    )
-    
-    chunks.append({
-        "array": spritesheet_arr,
-        "manifest_data": {
-            "file": spritesheet_filename,
-            "forecast_steps": steps_written,
-            "columns": num_frames,
-            "rows": 1,
-            "sheet_width": sheet_w,
-            "sheet_height": sheet_h
-        }
-    })
+        spritesheet_filename = patterns["spritesheet"].format(
+            model=model_name,
+            param=param_config["id"],
+            date=target_date,
+            run=chosen_run,
+            chunk_idx=chunk_idx
+        )
+        
+        chunks.append({
+            "array": spritesheet_arr,
+            "manifest_data": {
+                "file": spritesheet_filename,
+                "forecast_steps": chunk_steps,
+                "columns": num_cols,
+                "rows": 1,
+                "sheet_width": sheet_w,
+                "sheet_height": sheet_h
+            }
+        })
 
     return chunks, frame_w, frame_h
 
@@ -334,7 +317,7 @@ def run_master_pipeline(selected_param_key="2t"):
         CHOSEN_RUN, target_date = "06", now_utc.strftime("%Y%m%d")
     elif current_hour >= 8:
         CHOSEN_RUN, target_date = "00", now_utc.strftime("%Y%m%d")
-    elif current_hour >= 1: # Forcing 18z to bust cache
+    elif current_hour >= 2:
         CHOSEN_RUN = "18"
         target_date = (now_utc - datetime.timedelta(days=1)).strftime("%Y%m%d")
     else:
@@ -355,14 +338,16 @@ def run_master_pipeline(selected_param_key="2t"):
     results = {}
     contours_dict = {}
 
-    # 🌟 STRICTLY SEQUENTIAL TO PREVENT MEMORY COLLISIONS
-    for step in FORECAST_STEPS:
-        s, arr, contour_json = fetch_and_process_step(
-            client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME
-        )
-        if arr is not None:
-            results[s] = arr
-            contours_dict[s] = contour_json
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
+        future_to_step = {
+            executor.submit(fetch_and_process_step, client, target_date, CHOSEN_RUN, step, param_config, MODEL_NAME): step
+            for step in FORECAST_STEPS
+        }
+        for future in concurrent.futures.as_completed(future_to_step):
+            step, arr, contour_json = future.result()
+            if arr is not None:
+                results[step] = arr
+                contours_dict[step] = contour_json
 
     sorted_steps = sorted(results.keys())
     frame_arrays = [results[s] for s in sorted_steps]
