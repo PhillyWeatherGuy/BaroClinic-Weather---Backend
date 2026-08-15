@@ -14,7 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import gzip  # 🌟 Added gzip for compressed binary output
+import gzip  # Added gzip for compressed binary output
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -165,10 +165,9 @@ def process_grib_to_array(grib_path, param_config):
     arr -= min_val
     arr /= (max_val - min_val)
     
-    # 🌟 12-bit precision (4,096 levels -> finer than 0.01" accuracy) with LSB zeroing for small file sizes
+    # 🌟 12-bit precision (4,096 levels -> full precision restored)
     arr *= 4095.0
     arr_int = arr.astype(np.uint16)
-    arr_int = (arr_int >> 4) << 4
 
     return arr_int, contour_geojson
 
