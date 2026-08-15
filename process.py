@@ -165,7 +165,7 @@ def process_grib_to_array(grib_path, param_config):
     arr -= min_val
     arr /= (max_val - min_val)
     
-    # 🌟 12-bit precision (4,096 levels -> finer than 0.01" accuracy) with LSB zeroing
+    # 🌟 12-bit precision (4,096 levels -> finer than 0.01" accuracy) with LSB zeroing for small file sizes
     arr *= 4095.0
     arr_int = arr.astype(np.uint16)
     arr_int = (arr_int >> 4) << 4
@@ -220,7 +220,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         sheet_rows = 1
         sheet_h = frame_h
         
-        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint16)  # 🌟 uint16 buffer
+        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint16)  # uint16 buffer
 
         for idx, arr in enumerate(chunk_frames):
             x_start = idx * frame_w
@@ -403,7 +403,7 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        # 🌟 Gzip compress the 16-bit binary chunks
+        # Gzip compress the 16-bit binary chunks
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
                 f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=6))
@@ -433,7 +433,7 @@ def run_master_pipeline(selected_param_key="2t"):
     )
     
     for m_fname in ["manifest.json", run_manifest_filename]:
-        m_path = output_dist_dir / m_fname if isinstance(output_dist_dir, str) else os.path.join(output_dist_dir, m_fname)
+        m_path = os.path.join(output_dist_dir, m_fname)
         with open(m_path, 'w') as f:
             json.dump(manifest, f, indent=2)
 
