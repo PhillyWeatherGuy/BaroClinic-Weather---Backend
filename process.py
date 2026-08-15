@@ -14,7 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import gzip  # 🌟 1. Added gzip for 16-bit binary compression
+import gzip  # 🌟 Added gzip for compressed binary output
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -164,9 +164,13 @@ def process_grib_to_array(grib_path, param_config):
     np.clip(arr, min_val, max_val, out=arr)
     arr -= min_val
     arr /= (max_val - min_val)
-    arr *= 65535.0  # 🌟 2. Scaled to 16-bit integer range (0 - 65535)
+    
+    # 🌟 12-bit precision (4,096 levels -> finer than 0.01" accuracy) with LSB zeroing
+    arr *= 4095.0
+    arr_int = arr.astype(np.uint16)
+    arr_int = (arr_int >> 4) << 4
 
-    return arr.astype(np.uint16), contour_geojson  # 🌟 3. Returned as uint16
+    return arr_int, contour_geojson
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
@@ -216,7 +220,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         sheet_rows = 1
         sheet_h = frame_h
         
-        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint16)  # 🌟 4. uint16 spritesheet buffer
+        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint16)  # 🌟 uint16 buffer
 
         for idx, arr in enumerate(chunk_frames):
             x_start = idx * frame_w
@@ -399,7 +403,7 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        # 🌟 5. Compress 16-bit uint16 array with gzip before saving to disk
+        # 🌟 Gzip compress the 16-bit binary chunks
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
                 f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=6))
@@ -429,7 +433,7 @@ def run_master_pipeline(selected_param_key="2t"):
     )
     
     for m_fname in ["manifest.json", run_manifest_filename]:
-        m_path = os.path.join(output_dist_dir, m_fname)
+        m_path = output_dist_dir / m_fname if isinstance(output_dist_dir, str) else os.path.join(output_dist_dir, m_fname)
         with open(m_path, 'w') as f:
             json.dump(manifest, f, indent=2)
 
