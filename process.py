@@ -14,6 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
+import gzip  # 🌟 1. Added gzip for 16-bit binary compression
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -163,9 +164,9 @@ def process_grib_to_array(grib_path, param_config):
     np.clip(arr, min_val, max_val, out=arr)
     arr -= min_val
     arr /= (max_val - min_val)
-    arr *= 255.0
+    arr *= 65535.0  # 🌟 2. Scaled to 16-bit integer range (0 - 65535)
 
-    return arr.astype(np.uint8), contour_geojson
+    return arr.astype(np.uint16), contour_geojson  # 🌟 3. Returned as uint16
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
@@ -201,7 +202,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         return [], 0, 0
 
     frame_h, frame_w = frame_arrays[0].shape
-    frames_per_sheet = 10  # 10 horizontal frames per chunk (14,400px x 721px)
+    frames_per_sheet = 10  # 10 horizontal frames per chunk (1 row of 10)
 
     chunks = []
     patterns = param_config["filename_patterns"]
@@ -215,7 +216,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         sheet_rows = 1
         sheet_h = frame_h
         
-        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
+        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint16)  # 🌟 4. uint16 spritesheet buffer
 
         for idx, arr in enumerate(chunk_frames):
             x_start = idx * frame_w
@@ -246,7 +247,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
 
 
 def upload_single_file(s3_client, bucket_name, filepath, filename):
-    content_type = "application/json" if filename.endswith(".json") else "image/png"
+    content_type = "application/json" if filename.endswith(".json") else "application/octet-stream"
     try:
         with open(filepath, 'rb') as f:
             s3_client.put_object(
@@ -398,7 +399,13 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+        # 🌟 5. Compress 16-bit uint16 array with gzip before saving to disk
+        if filename.endswith(".bin"):
+            with open(filepath, "wb") as f:
+                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=6))
+        else:
+            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+            
         manifest_chunks.append(chunk["manifest_data"])
 
     manifest = {
