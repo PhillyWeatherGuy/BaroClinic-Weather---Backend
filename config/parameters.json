@@ -7,8 +7,11 @@
       "levtype": "sfc",
       "type": "fc",
       "unit": "°F",
-      "min_val": 216.4833,
-      "max_val": 327.5944,
+      "scaling": {
+        "mode": "linear",
+        "min_val": 216.4833,
+        "max_val": 327.5944
+      },
       "contours": [
         {
           "id": "freezing_32f",
@@ -34,10 +37,13 @@
       "levtype": "sfc",
       "type": "fc",
       "unit": "in",
-      "min_val": 0.0,
-      "max_val": 0.762,
-      "display_min": 0.0,
-      "display_max": 30.0,
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 39.3701,
+        "break_val": 1.0,
+        "max_val": 30.0,
+        "break_byte": 100
+      },
       "contours": [],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
