@@ -14,6 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
+import gzip  # 🌟 Built-in gzip for binary buffer support
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -119,6 +120,7 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
                 })
 
         if not features:
+            print(f"  ⚠️ Note: 0 contour feature sets generated.")
             return {"type": "FeatureCollection", "features": []}
 
         print(f"  ✨ Generated {len(features)} contour feature set(s)")
@@ -274,7 +276,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
 
 
 def upload_single_file(s3_client, bucket_name, filepath, filename):
-    content_type = "application/json" if filename.endswith(".json") else "image/png"
+    content_type = "application/json" if filename.endswith(".json") else ("application/octet-stream" if filename.endswith(".bin") else "image/png")
     try:
         with open(filepath, 'rb') as f:
             s3_client.put_object(
@@ -426,7 +428,15 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+        # 🌟 Dynamic Polymorphic Saver: checks extension from parameters.json
+        if filename.endswith(".bin"):
+            with open(filepath, "wb") as f:
+                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=6))
+        elif filename.endswith(".webp"):
+            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
+        else:
+            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+            
         manifest_chunks.append(chunk["manifest_data"])
 
     manifest = {
