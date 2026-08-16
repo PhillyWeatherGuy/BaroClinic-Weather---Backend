@@ -119,7 +119,6 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
                 })
 
         if not features:
-            print(f"  ⚠️ Note: 0 contour feature sets generated.")
             return {"type": "FeatureCollection", "features": []}
 
         print(f"  ✨ Generated {len(features)} contour feature set(s)")
@@ -140,21 +139,14 @@ def normalize_array(raw_arr, param_config):
     scaling = param_config.get("scaling", {})
     mode = scaling.get("mode", "linear")
 
-    if mode == "piecewise":
+    # 🌟 Fully dynamic piecewise breakpoint interpolation via NumPy C-core
+    if mode == "piecewise" and "val_points" in scaling and "byte_points" in scaling:
         multiplier = scaling.get("unit_multiplier", 1.0)
         v = np.nan_to_num(raw_arr, nan=0.0) * multiplier
-        
-        break_val = scaling.get("break_val", 1.0)
-        max_val = scaling.get("max_val", 50.0)
-        break_byte = scaling.get("break_byte", 100)
+        val_pts = scaling["val_points"]
+        byte_pts = scaling["byte_points"]
 
-        # Zone 1 (0 to break_val): Exact precision per pixel
-        zone1 = np.clip((v / break_val) * break_byte, 0, break_byte)
-        
-        # Zone 2 (break_val to max_val): Coarser precision
-        zone2 = break_byte + np.clip(((v - break_val) / (max_val - break_val)) * (255.0 - break_byte), 0, (255.0 - break_byte))
-
-        return np.where(v <= break_val, zone1, zone2).astype(np.uint8)
+        return np.interp(v, val_pts, byte_pts).astype(np.uint8)
 
     else:
         # Standard Linear Scaling (Temperature, Wind, Pressure, etc.)
@@ -203,7 +195,6 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     patterns = param_config["filename_patterns"]
     grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
 
-    # 🌟 Fully dynamic retrieval params from parameters.json
     retrieve_kwargs = {
         "date": target_date,
         "time": int(chosen_run),
