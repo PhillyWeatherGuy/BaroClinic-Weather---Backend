@@ -14,7 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import gzip  # Added gzip for compressed binary output
+import zstd  # 🌟 Swapped gzip for zstandard
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -398,14 +398,17 @@ def run_master_pipeline(selected_param_key="2t"):
 
     manifest_chunks = []
     
+    # 🌟 Initialize Zstd compressor (level 3 for blazing speed and great compression)
+    zstd_compressor = zstd.ZstdCompressor(level=3)
+    
     for chunk in chunks:
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        # Gzip compress the 16-bit binary chunks
+        # 🌟 Zstd compress the 16-bit binary chunks
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
-                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=6))
+                f.write(zstd_compressor.compress(chunk["array"].tobytes()))
         else:
             cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
             
