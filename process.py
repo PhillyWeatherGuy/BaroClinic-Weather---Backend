@@ -132,6 +132,43 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
         return {"type": "FeatureCollection", "features": []}
 
 
+def normalize_array(raw_arr, param_config):
+    """
+    🌟 DYNAMIC UNIVERSAL NORMALIZER
+    Dynamically scales raw GRIB values into 8-bit image bytes based on parameters.json
+    """
+    scaling = param_config.get("scaling", {})
+    mode = scaling.get("mode", "linear")
+
+    if mode == "piecewise":
+        multiplier = scaling.get("unit_multiplier", 1.0)
+        v = np.nan_to_num(raw_arr, nan=0.0) * multiplier
+        
+        break_val = scaling.get("break_val", 1.0)
+        max_val = scaling.get("max_val", 50.0)
+        break_byte = scaling.get("break_byte", 100)
+
+        # Zone 1 (0 to break_val): Exact precision per pixel
+        zone1 = np.clip((v / break_val) * break_byte, 0, break_byte)
+        
+        # Zone 2 (break_val to max_val): Coarser precision
+        zone2 = break_byte + np.clip(((v - break_val) / (max_val - break_val)) * (255.0 - break_byte), 0, (255.0 - break_byte))
+
+        return np.where(v <= break_val, zone1, zone2).astype(np.uint8)
+
+    else:
+        # Standard Linear Scaling (Temperature, Wind, Pressure, etc.)
+        min_v = scaling.get("min_val", param_config.get("min_val", 0.0))
+        max_v = scaling.get("max_val", param_config.get("max_val", 255.0))
+        
+        arr = np.nan_to_num(raw_arr, copy=False, nan=min_v)
+        np.clip(arr, min_v, max_v, out=arr)
+        arr -= min_v
+        arr /= (max_v - min_v)
+        arr *= 255.0
+        return arr.astype(np.uint8)
+
+
 def process_grib_to_array(grib_path, param_config):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
@@ -156,32 +193,32 @@ def process_grib_to_array(grib_path, param_config):
 
     contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
 
-    min_val = param_config["min_val"]
-    max_val = param_config["max_val"]
+    # 🌟 Dynamic normalization based on JSON config
+    arr_8bit = normalize_array(raw_arr_k, param_config)
 
-    arr = np.nan_to_num(raw_arr_k, copy=False, nan=min_val)
-    np.clip(arr, min_val, max_val, out=arr)
-    arr -= min_val
-    arr /= (max_val - min_val)
-    arr *= 255.0
-
-    return arr.astype(np.uint8), contour_geojson
+    return arr_8bit, contour_geojson
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
     patterns = param_config["filename_patterns"]
     grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
 
+    # 🌟 Fully dynamic retrieval params from parameters.json
+    retrieve_kwargs = {
+        "date": target_date,
+        "time": int(chosen_run),
+        "step": step,
+        "type": param_config.get("type", "fc"),
+        "levtype": param_config.get("levtype", "sfc"),
+        "param": [param_config["grib_param"]],
+        "target": grib_file
+    }
+
+    if "levelist" in param_config:
+        retrieve_kwargs["levelist"] = param_config["levelist"]
+
     try:
-        client.retrieve(
-            date=target_date, 
-            time=int(chosen_run), 
-            step=step,
-            type=param_config["type"], 
-            levtype=param_config["levtype"], 
-            param=[param_config["grib_param"]], 
-            target=grib_file
-        )
+        client.retrieve(**retrieve_kwargs)
         if os.path.exists(grib_file):
             frame_arr, contour_geojson = process_grib_to_array(grib_file, param_config)
             try: os.remove(grib_file)
@@ -201,7 +238,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         return [], 0, 0
 
     frame_h, frame_w = frame_arrays[0].shape
-    frames_per_sheet = 10  # 10 horizontal frames per chunk (14,400px x 721px)
+    frames_per_sheet = 10  # 10 horizontal frames per chunk (1 row)
 
     chunks = []
     patterns = param_config["filename_patterns"]
@@ -398,12 +435,15 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
+        cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
         manifest_chunks.append(chunk["manifest_data"])
 
     manifest = {
         "model": MODEL_NAME,
         "parameter": param_config["id"],
+        "name": param_config.get("name", param_config["id"]),
+        "unit": param_config.get("unit", ""),
+        "scaling": param_config.get("scaling", {}),  # 🌟 Passes scaling rules to manifest dynamically
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
         "init_time": init_time_iso,
@@ -411,8 +451,8 @@ def run_master_pipeline(selected_param_key="2t"):
         "total_frames": len(steps_written),
         "frame_width": frame_w,
         "frame_height": frame_h,
-        "temp_min_k": param_config["min_val"],
-        "temp_max_k": param_config["max_val"],
+        "temp_min_k": param_config.get("min_val", param_config.get("scaling", {}).get("min_val", 0.0)),
+        "temp_max_k": param_config.get("max_val", param_config.get("scaling", {}).get("max_val", 255.0)),
         "chunks": manifest_chunks,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat() + "Z"
     }
