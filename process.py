@@ -14,7 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import zstd  # 🌟 Swapped gzip for zstandard
+import zstandard as zstd  # 🌟 Swapped gzip for zstandard
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
