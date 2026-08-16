@@ -14,7 +14,6 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import zstandard as zstd  # 🌟 Swapped gzip for zstandard
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -164,12 +163,9 @@ def process_grib_to_array(grib_path, param_config):
     np.clip(arr, min_val, max_val, out=arr)
     arr -= min_val
     arr /= (max_val - min_val)
-    
-    # 🌟 12-bit precision (4,096 levels -> full precision restored)
-    arr *= 4095.0
-    arr_int = arr.astype(np.uint16)
+    arr *= 255.0
 
-    return arr_int, contour_geojson
+    return arr.astype(np.uint8), contour_geojson
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
@@ -205,7 +201,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         return [], 0, 0
 
     frame_h, frame_w = frame_arrays[0].shape
-    frames_per_sheet = 10  # 10 horizontal frames per chunk (1 row of 10)
+    frames_per_sheet = 10  # 10 horizontal frames per chunk (14,400px x 721px)
 
     chunks = []
     patterns = param_config["filename_patterns"]
@@ -219,7 +215,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         sheet_rows = 1
         sheet_h = frame_h
         
-        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint16)  # uint16 buffer
+        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
 
         for idx, arr in enumerate(chunk_frames):
             x_start = idx * frame_w
@@ -250,7 +246,7 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
 
 
 def upload_single_file(s3_client, bucket_name, filepath, filename):
-    content_type = "application/json" if filename.endswith(".json") else "application/octet-stream"
+    content_type = "application/json" if filename.endswith(".json") else "image/png"
     try:
         with open(filepath, 'rb') as f:
             s3_client.put_object(
@@ -398,20 +394,11 @@ def run_master_pipeline(selected_param_key="2t"):
 
     manifest_chunks = []
     
-    # 🌟 Initialize Zstd compressor (level 3 for blazing speed and great compression)
-    zstd_compressor = zstd.ZstdCompressor(level=3)
-    
     for chunk in chunks:
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        # 🌟 Zstd compress the 16-bit binary chunks
-        if filename.endswith(".bin"):
-            with open(filepath, "wb") as f:
-                f.write(zstd_compressor.compress(chunk["array"].tobytes()))
-        else:
-            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
-            
+        cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 3])
         manifest_chunks.append(chunk["manifest_data"])
 
     manifest = {
