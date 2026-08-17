@@ -431,7 +431,7 @@ def run_master_pipeline(selected_param_key="2t"):
         # 🌟 Dynamic Polymorphic Saver: checks extension from parameters.json
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
-                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=6))
+                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=7))
         elif filename.endswith(".webp"):
             cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
         else:
