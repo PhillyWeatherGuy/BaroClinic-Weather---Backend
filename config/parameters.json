@@ -24,7 +24,7 @@
       ],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
-        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.bin",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{date}_{run}z_manifest.json"
@@ -46,7 +46,7 @@
       "contours": [],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
-        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.bin",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json"
