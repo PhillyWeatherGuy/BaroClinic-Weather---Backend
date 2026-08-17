@@ -40,13 +40,13 @@
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 39.3701,
-        "val_points": [0.0, 1.0, 10, 30.0],
+        "val_points": [0.0, 1.0, 10, 50.0],
         "byte_points": [0, 100, 200, 255]
       },
       "contours": [],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
-        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.bin",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json"
