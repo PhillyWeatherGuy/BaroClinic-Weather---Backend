@@ -51,6 +51,28 @@
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json"
       }
+    },
+    "pwat": {
+      "id": "pwat",
+      "name": "Precipitable Water",
+      "grib_param": "tcwv",
+      "levtype": "sfc",
+      "type": "fc",
+      "unit": "in",
+      "scaling": {
+        "mode": "linear",
+        "unit_multiplier": 0.0393701,
+        "min_val": 0.0,
+        "max_val": 4.0
+      },
+      "contours": [],
+      "filename_patterns": {
+        "grib": "{model}_{param}_{step:03d}.grib2",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json"
+      }
     }
   }
 }
