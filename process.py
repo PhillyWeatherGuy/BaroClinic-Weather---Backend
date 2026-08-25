@@ -491,16 +491,24 @@ if __name__ == "__main__":
 
     print(f"🚀 Launching Pipeline for Parameters: {target_params}")
     
-    max_param_workers = min(len(target_params), MAX_CONCURRENT_PARAMS)
+    batch_size = MAX_CONCURRENT_PARAMS  # 2
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_param_workers) as executor:
-        futures = {executor.submit(run_master_pipeline, param): param for param in target_params}
-        for future in concurrent.futures.as_completed(futures):
-            param = futures[future]
-            try:
-                future.result()
-                print(f"✅ Finished parameter: {param}")
-            except Exception as e:
-                print(f"❌ Error processing parameter '{param}': {e}")
+    # 🌟 Batch execution: processes in chunks of 2, waiting for each batch to finish before starting next
+    for i in range(0, len(target_params), batch_size):
+        batch = target_params[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = math.ceil(len(target_params) / batch_size)
+        
+        print(f"\n📦 [Batch {batch_num}/{total_batches}] Running {len(batch)} parameter(s) concurrently: {batch}")
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=len(batch)) as executor:
+            futures = {executor.submit(run_master_pipeline, param): param for param in batch}
+            for future in concurrent.futures.as_completed(futures):
+                param = futures[future]
+                try:
+                    future.result()
+                    print(f"✅ Finished parameter: {param}")
+                except Exception as e:
+                    print(f"❌ Error processing parameter '{param}': {e}")
 
     print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")
