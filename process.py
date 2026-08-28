@@ -462,7 +462,16 @@ def run_master_pipeline(selected_param_key="2t"):
         model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
     
-    for m_fname in ["manifest.json", run_manifest_filename]:
+    manifest_files_to_write = ["manifest.json", run_manifest_filename]
+
+    # 🌟 Writes latest_manifest if defined in parameters.json (e.g. ecmwf_2t_manifest.json)
+    if "latest_manifest" in patterns:
+        latest_manifest_filename = patterns["latest_manifest"].format(
+            model=MODEL_NAME, param=param_config["id"]
+        )
+        manifest_files_to_write.append(latest_manifest_filename)
+
+    for m_fname in manifest_files_to_write:
         m_path = os.path.join(output_dist_dir, m_fname)
         with open(m_path, 'w') as f:
             json.dump(manifest, f, indent=2)
