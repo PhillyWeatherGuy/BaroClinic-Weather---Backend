@@ -50,7 +50,8 @@
         "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
-        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json"
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
       }
     },
     "pwat": {
@@ -72,7 +73,32 @@
         "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
-        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json"
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
+      }
+    },
+    "pva": {
+      "id": "pva",
+      "name": "500mb PVA",
+      "grib_param": "vo",
+      "levtype": "pl",
+      "levelist": 500,
+      "type": "fc",
+      "unit": "10⁻⁵ s⁻¹",
+      "scaling": {
+        "mode": "piecewise",
+        "unit_multiplier": 100000.0,
+        "val_points": [0.0, 3.0, 80.0],
+        "byte_points": [0, 30, 107]
+      },
+      "contours": [],
+      "filename_patterns": {
+        "grib": "{model}_{param}_{step:03d}.grib2",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
+        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_{param}_contours.json",
+        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_{param}_manifest.json"
       }
     }
   }
