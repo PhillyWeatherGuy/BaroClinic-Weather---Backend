@@ -14,7 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import gzip  # 🌟 Built-in gzip for binary buffer support
+import gzip
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -141,7 +141,6 @@ def normalize_array(raw_arr, param_config):
     scaling = param_config.get("scaling", {})
     mode = scaling.get("mode", "linear")
 
-    # 🌟 Fully dynamic piecewise breakpoint interpolation via NumPy C-core
     if mode == "piecewise" and "val_points" in scaling and "byte_points" in scaling:
         multiplier = scaling.get("unit_multiplier", 1.0)
         v = np.nan_to_num(raw_arr, nan=0.0) * multiplier
@@ -151,7 +150,6 @@ def normalize_array(raw_arr, param_config):
         return np.interp(v, val_pts, byte_pts).astype(np.uint8)
 
     else:
-        # Standard Linear Scaling (Temperature, Wind, Pressure, etc.)
         min_v = scaling.get("min_val", param_config.get("min_val", 0.0))
         max_v = scaling.get("max_val", param_config.get("max_val", 255.0))
         
@@ -200,7 +198,8 @@ def process_grib_to_array(grib_path, param_config):
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
     patterns = param_config["filename_patterns"]
-    grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
+    pattern_key = "grib"
+    grib_file = patterns[pattern_key].format(model=model_name, param=param_config["id"], step=step)
 
     retrieve_kwargs = {
         "date": target_date,
@@ -231,33 +230,29 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     return step, None, None
 
 
-def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
+def build_binary_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
+    """
+    🌟 SEQUENTIAL BINARY TIME-CHUNK BUILDER
+    Stacks frames sequentially in time without oversized 2D spritesheet stitching
+    """
     if not frame_arrays:
         return [], 0, 0
 
     frame_h, frame_w = frame_arrays[0].shape
-    frames_per_sheet = 10  # 10 horizontal frames per chunk (1 row)
+    frames_per_chunk = 10
 
     chunks = []
     patterns = param_config["filename_patterns"]
+    pattern_key = "chunk" if "chunk" in patterns else "spritesheet"
     
-    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
-        chunk_frames = frame_arrays[i:i + frames_per_sheet]
-        chunk_steps = steps_written[i:i + frames_per_sheet]
+    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_chunk)):
+        chunk_frames = frame_arrays[i:i + frames_per_chunk]
+        chunk_steps = steps_written[i:i + frames_per_chunk]
         
-        num_cols = len(chunk_frames)
-        sheet_w = frame_w * num_cols
-        sheet_rows = 1
-        sheet_h = frame_h
-        
-        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
+        # 🌟 Fast contiguous memory stream of raw uint8 frames
+        raw_bytes = b"".join([arr.tobytes() for arr in chunk_frames])
 
-        for idx, arr in enumerate(chunk_frames):
-            x_start = idx * frame_w
-            x_end = x_start + frame_w
-            spritesheet_arr[0:frame_h, x_start:x_end] = arr
-
-        spritesheet_filename = patterns["spritesheet"].format(
+        chunk_filename = patterns[pattern_key].format(
             model=model_name,
             param=param_config["id"],
             date=target_date,
@@ -266,14 +261,15 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         )
         
         chunks.append({
-            "array": spritesheet_arr,
+            "bytes": raw_bytes,
             "manifest_data": {
-                "file": spritesheet_filename,
+                "file": chunk_filename,
                 "forecast_steps": chunk_steps,
-                "columns": num_cols,
+                "columns": 1,
                 "rows": 1,
-                "sheet_width": sheet_w,
-                "sheet_height": sheet_h
+                "frame_count": len(chunk_frames),
+                "sheet_width": frame_w,
+                "sheet_height": frame_h
             }
         })
 
@@ -418,7 +414,7 @@ def run_master_pipeline(selected_param_key="2t"):
     with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
-    chunks, frame_w, frame_h = build_spritesheet_chunks(
+    chunks, frame_w, frame_h = build_binary_chunks(
         frame_arrays, 
         steps_written, 
         model_name=MODEL_NAME, 
@@ -433,14 +429,14 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        # 🌟 Dynamic Polymorphic Saver: checks extension from parameters.json
+        # 🌟 Fast Gzip compression of contiguous byte buffer
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
-                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=9))
+                f.write(gzip.compress(chunk["bytes"], compresslevel=6))
         elif filename.endswith(".webp"):
-            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
+            cv2.imwrite(filepath, chunk.get("array"), [int(cv2.IMWRITE_WEBP_QUALITY), 101])
         else:
-            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+            cv2.imwrite(filepath, chunk.get("array"), [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
             
         manifest_chunks.append(chunk["manifest_data"])
 
@@ -449,11 +445,11 @@ def run_master_pipeline(selected_param_key="2t"):
         "parameter": param_config["id"],
         "name": param_config.get("name", param_config["id"]),
         "unit": param_config.get("unit", ""),
-        "scaling": param_config.get("scaling", {}),  # 🌟 Passes scaling rules to manifest dynamically
+        "scaling": param_config.get("scaling", {}),
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
         "init_time": init_time_iso,
-        "type": "spritesheet_chunked",
+        "type": "binary_time_chunked",
         "total_frames": len(steps_written),
         "frame_width": frame_w,
         "frame_height": frame_h,
@@ -504,9 +500,8 @@ if __name__ == "__main__":
 
     print(f"🚀 Launching Pipeline for Parameters: {target_params}")
     
-    batch_size = MAX_CONCURRENT_PARAMS  # 2
+    batch_size = MAX_CONCURRENT_PARAMS
 
-    # 🌟 Batch execution: processes in chunks of 2, waiting for each batch to finish before starting next
     for i in range(0, len(target_params), batch_size):
         batch = target_params[i:i + batch_size]
         batch_num = (i // batch_size) + 1
