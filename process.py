@@ -1,3 +1,4 @@
+# process.py
 import os
 import shutil
 import datetime
@@ -22,18 +23,13 @@ MAX_FORECAST_HOURS = 360
 FORECAST_STEPS = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 MAX_TEXTURE_SIZE = 4096
-
 MAX_CONCURRENT_WORKERS = 4
-
 MAX_CONCURRENT_PARAMS = 2
 
 CONFIG_FILE_PATH = os.path.join("config", "parameters.json")
 
 
 def load_parameter_config(param_key="2t"):
-    """
-    Loads parameter configuration from config/parameters.json
-    """
     if os.path.exists(CONFIG_FILE_PATH):
         with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -43,101 +39,7 @@ def load_parameter_config(param_key="2t"):
     raise FileNotFoundError(f"Parameter '{param_key}' not found in {CONFIG_FILE_PATH}")
 
 
-def split_path_at_dateline(vertices, max_jump=180.0):
-    if len(vertices) < 2:
-        return []
-
-    split_paths = []
-    current_path = [vertices[0]]
-
-    for i in range(1, len(vertices)):
-        prev_pt = vertices[i - 1]
-        curr_pt = vertices[i]
-
-        if abs(curr_pt[0] - prev_pt[0]) > max_jump:
-            if len(current_path) >= 2:
-                split_paths.append(current_path)
-            current_path = [curr_pt]
-        else:
-            current_path.append(curr_pt)
-
-    if len(current_path) >= 2:
-        split_paths.append(current_path)
-
-    return split_paths
-
-
-def extract_contour_geojson(raw_arr_k, contours_config=None):
-    if not contours_config:
-        return {"type": "FeatureCollection", "features": []}
-
-    try:
-        frame_h, frame_w = raw_arr_k.shape
-        
-        smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
-        smoothed_flipped = np.flipud(smoothed)
-        
-        smoothed_cyclic = np.hstack([smoothed_flipped, smoothed_flipped[:, :1]])
-        
-        lon_step = 360.0 / frame_w
-        lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
-        lats = np.linspace(-90.0, 90.0, frame_h)
-            
-        cont_gen = contourpy.contour_generator(x=lons, y=lats, z=smoothed_cyclic)
-        features = []
-
-        for c_def in contours_config:
-            target_val = c_def["target"]
-            lines = cont_gen.lines(target_val)
-            
-            segments = []
-            for line_array in lines:
-                if len(line_array) >= 2:
-                    pts = []
-                    for pt in line_array:
-                        lng = float(pt[0])
-                        lat = float(pt[1])
-                        if lng > 180.0:
-                            lng = 180.0
-                        pts.append([round(lng, 4), round(lat, 4)])
-                    
-                    all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
-                    all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
-                    
-                    if not all_on_left and not all_on_right:
-                        segments.append(pts)
-
-            if segments:
-                features.append({
-                    "type": "Feature",
-                    "geometry": {"type": "MultiLineString", "coordinates": segments},
-                    "properties": {
-                        "name": c_def["name"],
-                        "color": c_def["color"],
-                        "width": c_def["width"],
-                        "opacity": c_def["opacity"]
-                    }
-                })
-
-        if not features:
-            print(f"  ⚠️ Note: 0 contour feature sets generated.")
-            return {"type": "FeatureCollection", "features": []}
-
-        print(f"  ✨ Generated {len(features)} contour feature set(s)")
-        return {
-            "type": "FeatureCollection",
-            "features": features
-        }
-    except Exception as e:
-        print(f"  ❌ Contour extraction exception: {e}")
-        return {"type": "FeatureCollection", "features": []}
-
-
 def normalize_array(raw_arr, param_config):
-    """
-    🌟 DYNAMIC UNIVERSAL NORMALIZER
-    Dynamically scales raw GRIB values into 8-bit image bytes based on parameters.json
-    """
     scaling = param_config.get("scaling", {})
     mode = scaling.get("mode", "linear")
 
@@ -146,13 +48,10 @@ def normalize_array(raw_arr, param_config):
         v = np.nan_to_num(raw_arr, nan=0.0) * multiplier
         val_pts = scaling["val_points"]
         byte_pts = scaling["byte_points"]
-
         return np.interp(v, val_pts, byte_pts).astype(np.uint8)
-
     else:
         min_v = scaling.get("min_val", param_config.get("min_val", 0.0))
         max_v = scaling.get("max_val", param_config.get("max_val", 255.0))
-        
         arr = np.nan_to_num(raw_arr, copy=False, nan=min_v)
         np.clip(arr, min_v, max_v, out=arr)
         arr -= min_v
@@ -164,10 +63,8 @@ def normalize_array(raw_arr, param_config):
 def process_grib_to_array(grib_path, param_config):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
-    if 'lon' in ds.coords:
-        ds = ds.rename({'lon': 'longitude'})
-    if 'lat' in ds.coords:
-        ds = ds.rename({'lat': 'latitude'})
+    if 'lon' in ds.coords: ds = ds.rename({'lon': 'longitude'})
+    if 'lat' in ds.coords: ds = ds.rename({'lat': 'latitude'})
 
     ds = ds.sortby('latitude', ascending=False)
     
@@ -183,14 +80,9 @@ def process_grib_to_array(grib_path, param_config):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    # 🌟 Read smoothing_sigma dynamically from parameters.json
-    sigma = param_config.get("smoothing_sigma", 0.0)
-    if sigma > 0:
-        raw_arr_k = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (0, 0), sigma)
+    contour_geojson = {"type": "FeatureCollection", "features": []}
 
-    contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
-
-    # Dynamic normalization based on JSON config
+    # 🌟 Native ECMWF 1440 x 721 normalization
     arr_8bit = normalize_array(raw_arr_k, param_config)
 
     return arr_8bit, contour_geojson
@@ -198,8 +90,7 @@ def process_grib_to_array(grib_path, param_config):
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
     patterns = param_config["filename_patterns"]
-    pattern_key = "grib"
-    grib_file = patterns[pattern_key].format(model=model_name, param=param_config["id"], step=step)
+    grib_file = patterns.get("grib", "{model}_{param}_{step:03d}.grib2").format(model=model_name, param=param_config["id"], step=step)
 
     retrieve_kwargs = {
         "date": target_date,
@@ -231,14 +122,10 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
 
 
 def build_binary_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
-    """
-    🌟 SEQUENTIAL BINARY TIME-CHUNK BUILDER
-    Stacks frames sequentially in time without oversized 2D spritesheet stitching
-    """
     if not frame_arrays:
         return [], 0, 0
 
-    frame_h, frame_w = frame_arrays[0].shape
+    frame_h, frame_w = frame_arrays[0].shape  # 721 x 1440
     frames_per_chunk = 10
 
     chunks = []
@@ -249,7 +136,7 @@ def build_binary_chunks(frame_arrays, steps_written, model_name, param_config, t
         chunk_frames = frame_arrays[i:i + frames_per_chunk]
         chunk_steps = steps_written[i:i + frames_per_chunk]
         
-        # 🌟 Fast contiguous memory stream of raw uint8 frames
+        # Pure contiguous uint8 stream of 1440 x 721 frames
         raw_bytes = b"".join([arr.tobytes() for arr in chunk_frames])
 
         chunk_filename = patterns[pattern_key].format(
@@ -429,7 +316,6 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        # 🌟 Fast Gzip compression of contiguous byte buffer
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
                 f.write(gzip.compress(chunk["bytes"], compresslevel=6))
