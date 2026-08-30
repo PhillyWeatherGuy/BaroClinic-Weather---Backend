@@ -1,4 +1,3 @@
-# process.py
 import os
 import shutil
 import datetime
@@ -15,7 +14,7 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import gzip
+import gzip  # 🌟 Built-in gzip for binary buffer support
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -23,13 +22,18 @@ MAX_FORECAST_HOURS = 360
 FORECAST_STEPS = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
 
 MAX_TEXTURE_SIZE = 4096
+
 MAX_CONCURRENT_WORKERS = 4
+
 MAX_CONCURRENT_PARAMS = 2
 
 CONFIG_FILE_PATH = os.path.join("config", "parameters.json")
 
 
 def load_parameter_config(param_key="2t"):
+    """
+    Loads parameter configuration from config/parameters.json
+    """
     if os.path.exists(CONFIG_FILE_PATH):
         with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -39,19 +43,118 @@ def load_parameter_config(param_key="2t"):
     raise FileNotFoundError(f"Parameter '{param_key}' not found in {CONFIG_FILE_PATH}")
 
 
+def split_path_at_dateline(vertices, max_jump=180.0):
+    if len(vertices) < 2:
+        return []
+
+    split_paths = []
+    current_path = [vertices[0]]
+
+    for i in range(1, len(vertices)):
+        prev_pt = vertices[i - 1]
+        curr_pt = vertices[i]
+
+        if abs(curr_pt[0] - prev_pt[0]) > max_jump:
+            if len(current_path) >= 2:
+                split_paths.append(current_path)
+            current_path = [curr_pt]
+        else:
+            current_path.append(curr_pt)
+
+    if len(current_path) >= 2:
+        split_paths.append(current_path)
+
+    return split_paths
+
+
+def extract_contour_geojson(raw_arr_k, contours_config=None):
+    if not contours_config:
+        return {"type": "FeatureCollection", "features": []}
+
+    try:
+        frame_h, frame_w = raw_arr_k.shape
+        
+        smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
+        smoothed_flipped = np.flipud(smoothed)
+        
+        smoothed_cyclic = np.hstack([smoothed_flipped, smoothed_flipped[:, :1]])
+        
+        lon_step = 360.0 / frame_w
+        lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
+        lats = np.linspace(-90.0, 90.0, frame_h)
+            
+        cont_gen = contourpy.contour_generator(x=lons, y=lats, z=smoothed_cyclic)
+        features = []
+
+        for c_def in contours_config:
+            target_val = c_def["target"]
+            lines = cont_gen.lines(target_val)
+            
+            segments = []
+            for line_array in lines:
+                if len(line_array) >= 2:
+                    pts = []
+                    for pt in line_array:
+                        lng = float(pt[0])
+                        lat = float(pt[1])
+                        if lng > 180.0:
+                            lng = 180.0
+                        pts.append([round(lng, 4), round(lat, 4)])
+                    
+                    all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
+                    all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
+                    
+                    if not all_on_left and not all_on_right:
+                        segments.append(pts)
+
+            if segments:
+                features.append({
+                    "type": "Feature",
+                    "geometry": {"type": "MultiLineString", "coordinates": segments},
+                    "properties": {
+                        "name": c_def["name"],
+                        "color": c_def["color"],
+                        "width": c_def["width"],
+                        "opacity": c_def["opacity"]
+                    }
+                })
+
+        if not features:
+            print(f"  ⚠️ Note: 0 contour feature sets generated.")
+            return {"type": "FeatureCollection", "features": []}
+
+        print(f"  ✨ Generated {len(features)} contour feature set(s)")
+        return {
+            "type": "FeatureCollection",
+            "features": features
+        }
+    except Exception as e:
+        print(f"  ❌ Contour extraction exception: {e}")
+        return {"type": "FeatureCollection", "features": []}
+
+
 def normalize_array(raw_arr, param_config):
+    """
+    🌟 DYNAMIC UNIVERSAL NORMALIZER
+    Dynamically scales raw GRIB values into 8-bit image bytes based on parameters.json
+    """
     scaling = param_config.get("scaling", {})
     mode = scaling.get("mode", "linear")
 
+    # 🌟 Fully dynamic piecewise breakpoint interpolation via NumPy C-core
     if mode == "piecewise" and "val_points" in scaling and "byte_points" in scaling:
         multiplier = scaling.get("unit_multiplier", 1.0)
         v = np.nan_to_num(raw_arr, nan=0.0) * multiplier
         val_pts = scaling["val_points"]
         byte_pts = scaling["byte_points"]
+
         return np.interp(v, val_pts, byte_pts).astype(np.uint8)
+
     else:
+        # Standard Linear Scaling (Temperature, Wind, Pressure, etc.)
         min_v = scaling.get("min_val", param_config.get("min_val", 0.0))
         max_v = scaling.get("max_val", param_config.get("max_val", 255.0))
+        
         arr = np.nan_to_num(raw_arr, copy=False, nan=min_v)
         np.clip(arr, min_v, max_v, out=arr)
         arr -= min_v
@@ -63,8 +166,10 @@ def normalize_array(raw_arr, param_config):
 def process_grib_to_array(grib_path, param_config):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
     
-    if 'lon' in ds.coords: ds = ds.rename({'lon': 'longitude'})
-    if 'lat' in ds.coords: ds = ds.rename({'lat': 'latitude'})
+    if 'lon' in ds.coords:
+        ds = ds.rename({'lon': 'longitude'})
+    if 'lat' in ds.coords:
+        ds = ds.rename({'lat': 'latitude'})
 
     ds = ds.sortby('latitude', ascending=False)
     
@@ -80,9 +185,9 @@ def process_grib_to_array(grib_path, param_config):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    contour_geojson = {"type": "FeatureCollection", "features": []}
+    contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
 
-    # 🌟 Native ECMWF 1440 x 721 normalization
+    # 🌟 Dynamic normalization based on JSON config
     arr_8bit = normalize_array(raw_arr_k, param_config)
 
     return arr_8bit, contour_geojson
@@ -90,7 +195,7 @@ def process_grib_to_array(grib_path, param_config):
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
     patterns = param_config["filename_patterns"]
-    grib_file = patterns.get("grib", "{model}_{param}_{step:03d}.grib2").format(model=model_name, param=param_config["id"], step=step)
+    grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
 
     retrieve_kwargs = {
         "date": target_date,
@@ -121,25 +226,33 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     return step, None, None
 
 
-def build_binary_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
+def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
     if not frame_arrays:
         return [], 0, 0
 
-    frame_h, frame_w = frame_arrays[0].shape  # 721 x 1440
-    frames_per_chunk = 10
+    frame_h, frame_w = frame_arrays[0].shape
+    frames_per_sheet = 10  # 10 horizontal frames per chunk (1 row)
 
     chunks = []
     patterns = param_config["filename_patterns"]
-    pattern_key = "chunk" if "chunk" in patterns else "spritesheet"
     
-    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_chunk)):
-        chunk_frames = frame_arrays[i:i + frames_per_chunk]
-        chunk_steps = steps_written[i:i + frames_per_chunk]
+    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
+        chunk_frames = frame_arrays[i:i + frames_per_sheet]
+        chunk_steps = steps_written[i:i + frames_per_sheet]
         
-        # Pure contiguous uint8 stream of 1440 x 721 frames
-        raw_bytes = b"".join([arr.tobytes() for arr in chunk_frames])
+        num_cols = len(chunk_frames)
+        sheet_w = frame_w * num_cols
+        sheet_rows = 1
+        sheet_h = frame_h
+        
+        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
 
-        chunk_filename = patterns[pattern_key].format(
+        for idx, arr in enumerate(chunk_frames):
+            x_start = idx * frame_w
+            x_end = x_start + frame_w
+            spritesheet_arr[0:frame_h, x_start:x_end] = arr
+
+        spritesheet_filename = patterns["spritesheet"].format(
             model=model_name,
             param=param_config["id"],
             date=target_date,
@@ -148,15 +261,14 @@ def build_binary_chunks(frame_arrays, steps_written, model_name, param_config, t
         )
         
         chunks.append({
-            "bytes": raw_bytes,
+            "array": spritesheet_arr,
             "manifest_data": {
-                "file": chunk_filename,
+                "file": spritesheet_filename,
                 "forecast_steps": chunk_steps,
-                "columns": 1,
+                "columns": num_cols,
                 "rows": 1,
-                "frame_count": len(chunk_frames),
-                "sheet_width": frame_w,
-                "sheet_height": frame_h
+                "sheet_width": sheet_w,
+                "sheet_height": sheet_h
             }
         })
 
@@ -301,7 +413,7 @@ def run_master_pipeline(selected_param_key="2t"):
     with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
-    chunks, frame_w, frame_h = build_binary_chunks(
+    chunks, frame_w, frame_h = build_spritesheet_chunks(
         frame_arrays, 
         steps_written, 
         model_name=MODEL_NAME, 
@@ -316,13 +428,14 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
+        # 🌟 Dynamic Polymorphic Saver: checks extension from parameters.json
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
-                f.write(gzip.compress(chunk["bytes"], compresslevel=6))
+                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=9))
         elif filename.endswith(".webp"):
-            cv2.imwrite(filepath, chunk.get("array"), [int(cv2.IMWRITE_WEBP_QUALITY), 101])
+            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
         else:
-            cv2.imwrite(filepath, chunk.get("array"), [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
             
         manifest_chunks.append(chunk["manifest_data"])
 
@@ -331,11 +444,11 @@ def run_master_pipeline(selected_param_key="2t"):
         "parameter": param_config["id"],
         "name": param_config.get("name", param_config["id"]),
         "unit": param_config.get("unit", ""),
-        "scaling": param_config.get("scaling", {}),
+        "scaling": param_config.get("scaling", {}),  # 🌟 Passes scaling rules to manifest dynamically
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
         "init_time": init_time_iso,
-        "type": "binary_time_chunked",
+        "type": "spritesheet_chunked",
         "total_frames": len(steps_written),
         "frame_width": frame_w,
         "frame_height": frame_h,
@@ -351,6 +464,7 @@ def run_master_pipeline(selected_param_key="2t"):
     
     manifest_files_to_write = ["manifest.json", run_manifest_filename]
 
+    # 🌟 Writes latest_manifest if defined in parameters.json (e.g. ecmwf_2t_manifest.json)
     if "latest_manifest" in patterns:
         latest_manifest_filename = patterns["latest_manifest"].format(
             model=MODEL_NAME, param=param_config["id"]
@@ -386,8 +500,9 @@ if __name__ == "__main__":
 
     print(f"🚀 Launching Pipeline for Parameters: {target_params}")
     
-    batch_size = MAX_CONCURRENT_PARAMS
+    batch_size = MAX_CONCURRENT_PARAMS  # 2
 
+    # 🌟 Batch execution: processes in chunks of 2, waiting for each batch to finish before starting next
     for i in range(0, len(target_params), batch_size):
         batch = target_params[i:i + batch_size]
         batch_num = (i // batch_size) + 1
