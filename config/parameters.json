@@ -24,7 +24,7 @@
       ],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
-        "chunk": "{model}_{param}_{date}_{run}z_chunk_{chunk_idx}.bin",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{date}_{run}z_manifest.json",
@@ -38,7 +38,6 @@
       "levtype": "sfc",
       "type": "fc",
       "unit": "in",
-      "smoothing_sigma": 0.65,
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 39.3701,
@@ -48,7 +47,7 @@
       "contours": [],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
-        "chunk": "{model}_{param}_{date}_{run}z_chunk_{chunk_idx}.bin",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
@@ -62,7 +61,6 @@
       "levtype": "sfc",
       "type": "fc",
       "unit": "in",
-      "smoothing_sigma": 0.8,
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 0.0393701,
@@ -72,7 +70,7 @@
       "contours": [],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
-        "chunk": "{model}_{param}_{date}_{run}z_chunk_{chunk_idx}.bin",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
@@ -87,7 +85,6 @@
       "levelist": 500,
       "type": "fc",
       "unit": "10⁻⁵ s⁻¹",
-      "smoothing_sigma": 0.85,
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 100000.0,
@@ -97,7 +94,7 @@
       "contours": [],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
-        "chunk": "{model}_{param}_{date}_{run}z_chunk_{chunk_idx}.bin",
+        "spritesheet": "{model}_{param}_{date}_{run}z_spritesheet_{chunk_idx}.png",
         "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
         "latest_contours": "{model}_{param}_contours.json",
         "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
