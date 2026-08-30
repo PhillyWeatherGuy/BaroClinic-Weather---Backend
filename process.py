@@ -226,33 +226,29 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     return step, None, None
 
 
-def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
+def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
+    """
+    🌟 Builds contiguous 3D binary time-volume chunks [T, H, W]
+    Preserves native resolution without 2D sprite edge bleeding.
+    """
     if not frame_arrays:
         return [], 0, 0
 
     frame_h, frame_w = frame_arrays[0].shape
-    frames_per_sheet = 10  # 10 horizontal frames per chunk (1 row)
+    frames_per_volume = 10  # 10 time frames per binary chunk
 
     chunks = []
     patterns = param_config["filename_patterns"]
+    pattern_key = "volume" if "volume" in patterns else "spritesheet"
     
-    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_sheet)):
-        chunk_frames = frame_arrays[i:i + frames_per_sheet]
-        chunk_steps = steps_written[i:i + frames_per_sheet]
+    for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_volume)):
+        chunk_frames = frame_arrays[i:i + frames_per_volume]
+        chunk_steps = steps_written[i:i + frames_per_volume]
         
-        num_cols = len(chunk_frames)
-        sheet_w = frame_w * num_cols
-        sheet_rows = 1
-        sheet_h = frame_h
-        
-        spritesheet_arr = np.zeros((sheet_h, sheet_w), dtype=np.uint8)
+        # Contiguous 3D stack of frames [T, H, W]
+        volume_arr = np.stack(chunk_frames, axis=0).astype(np.uint8)
 
-        for idx, arr in enumerate(chunk_frames):
-            x_start = idx * frame_w
-            x_end = x_start + frame_w
-            spritesheet_arr[0:frame_h, x_start:x_end] = arr
-
-        spritesheet_filename = patterns["spritesheet"].format(
+        volume_filename = patterns[pattern_key].format(
             model=model_name,
             param=param_config["id"],
             date=target_date,
@@ -261,14 +257,11 @@ def build_spritesheet_chunks(frame_arrays, steps_written, model_name, param_conf
         )
         
         chunks.append({
-            "array": spritesheet_arr,
+            "array": volume_arr,
             "manifest_data": {
-                "file": spritesheet_filename,
+                "file": volume_filename,
                 "forecast_steps": chunk_steps,
-                "columns": num_cols,
-                "rows": 1,
-                "sheet_width": sheet_w,
-                "sheet_height": sheet_h
+                "frame_count": len(chunk_frames)
             }
         })
 
@@ -413,7 +406,7 @@ def run_master_pipeline(selected_param_key="2t"):
     with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
 
-    chunks, frame_w, frame_h = build_spritesheet_chunks(
+    chunks, frame_w, frame_h = build_volume_chunks(
         frame_arrays, 
         steps_written, 
         model_name=MODEL_NAME, 
@@ -428,7 +421,7 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
         
-        # 🌟 Dynamic Polymorphic Saver: checks extension from parameters.json
+        # 🌟 Writes Gzip-compressed raw binary buffer
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
                 f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=9))
@@ -444,11 +437,11 @@ def run_master_pipeline(selected_param_key="2t"):
         "parameter": param_config["id"],
         "name": param_config.get("name", param_config["id"]),
         "unit": param_config.get("unit", ""),
-        "scaling": param_config.get("scaling", {}),  # 🌟 Passes scaling rules to manifest dynamically
+        "scaling": param_config.get("scaling", {}),
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
         "init_time": init_time_iso,
-        "type": "spritesheet_chunked",
+        "type": "volume_chunked",
         "total_frames": len(steps_written),
         "frame_width": frame_w,
         "frame_height": frame_h,
@@ -464,7 +457,6 @@ def run_master_pipeline(selected_param_key="2t"):
     
     manifest_files_to_write = ["manifest.json", run_manifest_filename]
 
-    # 🌟 Writes latest_manifest if defined in parameters.json (e.g. ecmwf_2t_manifest.json)
     if "latest_manifest" in patterns:
         latest_manifest_filename = patterns["latest_manifest"].format(
             model=MODEL_NAME, param=param_config["id"]
@@ -500,9 +492,8 @@ if __name__ == "__main__":
 
     print(f"🚀 Launching Pipeline for Parameters: {target_params}")
     
-    batch_size = MAX_CONCURRENT_PARAMS  # 2
+    batch_size = MAX_CONCURRENT_PARAMS
 
-    # 🌟 Batch execution: processes in chunks of 2, waiting for each batch to finish before starting next
     for i in range(0, len(target_params), batch_size):
         batch = target_params[i:i + batch_size]
         batch_num = (i // batch_size) + 1
