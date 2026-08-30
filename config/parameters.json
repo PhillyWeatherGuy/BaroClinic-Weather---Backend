@@ -38,6 +38,7 @@
       "levtype": "sfc",
       "type": "fc",
       "unit": "in",
+      "smoothing_sigma": 0.65,
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 39.3701,
@@ -61,6 +62,7 @@
       "levtype": "sfc",
       "type": "fc",
       "unit": "in",
+      "smoothing_sigma": 0.8,
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 0.0393701,
@@ -85,6 +87,7 @@
       "levelist": 500,
       "type": "fc",
       "unit": "10⁻⁵ s⁻¹",
+      "smoothing_sigma": 0.85,
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 100000.0,
