@@ -185,9 +185,14 @@ def process_grib_to_array(grib_path, param_config):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
+    # 🌟 Read smoothing_sigma dynamically from parameters.json
+    sigma = param_config.get("smoothing_sigma", 0.0)
+    if sigma > 0:
+        raw_arr_k = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (0, 0), sigma)
+
     contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
 
-    # 🌟 Dynamic normalization based on JSON config
+    # Dynamic normalization based on JSON config
     arr_8bit = normalize_array(raw_arr_k, param_config)
 
     return arr_8bit, contour_geojson
@@ -464,7 +469,6 @@ def run_master_pipeline(selected_param_key="2t"):
     
     manifest_files_to_write = ["manifest.json", run_manifest_filename]
 
-    # 🌟 Writes latest_manifest if defined in parameters.json (e.g. ecmwf_2t_manifest.json)
     if "latest_manifest" in patterns:
         latest_manifest_filename = patterns["latest_manifest"].format(
             model=MODEL_NAME, param=param_config["id"]
