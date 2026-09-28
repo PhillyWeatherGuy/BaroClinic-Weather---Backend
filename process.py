@@ -67,29 +67,100 @@ def split_path_at_dateline(vertices, max_jump=180.0):
     return split_paths
 
 
-def extract_contour_geojson(raw_arr_k, contours_config=None):
+def extract_contour_geojson(raw_arr_k, contours_config=None, contour_settings=None):
     if not contours_config:
         return {"type": "FeatureCollection", "features": []}
 
     try:
-        frame_h, frame_w = raw_arr_k.shape
-        
-        smoothed = cv2.GaussianBlur(raw_arr_k.astype(np.float32), (5, 5), 1.2)
+        contour_settings = contour_settings or {}
+        coarsen_stride = max(1, int(contour_settings.get("coarsen_stride", 1)))
+        blur_kernel = tuple(contour_settings.get("blur_kernel", (5, 5)))
+        blur_sigma = float(contour_settings.get("blur_sigma", 1.2))
+
+        working_arr = raw_arr_k.astype(np.float32)
+        if coarsen_stride > 1:
+            working_arr = cv2.resize(
+                working_arr,
+                (max(1, working_arr.shape[1] // coarsen_stride), max(1, working_arr.shape[0] // coarsen_stride)),
+                interpolation=cv2.INTER_AREA,
+            )
+
+        frame_h, frame_w = working_arr.shape
+        smoothed = cv2.GaussianBlur(working_arr, blur_kernel, blur_sigma)
         smoothed_flipped = np.flipud(smoothed)
-        
+
         smoothed_cyclic = np.hstack([smoothed_flipped, smoothed_flipped[:, :1]])
-        
+
         lon_step = 360.0 / frame_w
         lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
         lats = np.linspace(-90.0, 90.0, frame_h)
-            
+
         cont_gen = contourpy.contour_generator(x=lons, y=lats, z=smoothed_cyclic)
         features = []
 
+        generated_targets = []
         for c_def in contours_config:
-            target_val = c_def["target"]
+            if c_def.get("dynamic"):
+                interval = float(c_def.get("interval", 6.0))
+                safe_arr = np.nan_to_num(working_arr, nan=0.0)
+                data_min = float(np.nanmin(safe_arr))
+                data_max = float(np.nanmax(safe_arr))
+                if np.isfinite(data_min) and np.isfinite(data_max) and data_max > data_min:
+                    start = math.ceil(data_min / interval) * interval
+                    stop = math.floor(data_max / interval) * interval
+                    generated_targets.extend(float(v) for v in np.arange(start, stop + (interval * 0.5), interval))
+                continue
+
+            if "target" in c_def:
+                generated_targets.append(float(c_def["target"]))
+
+        for c_def in contours_config:
+            if c_def.get("dynamic"):
+                dynamic_vals = []
+                interval = float(c_def.get("interval", 6.0))
+                safe_arr = np.nan_to_num(working_arr, nan=0.0)
+                data_min = float(np.nanmin(safe_arr))
+                data_max = float(np.nanmax(safe_arr))
+                if np.isfinite(data_min) and np.isfinite(data_max) and data_max > data_min:
+                    start = math.ceil(data_min / interval) * interval
+                    stop = math.floor(data_max / interval) * interval
+                    dynamic_vals = [float(v) for v in np.arange(start, stop + (interval * 0.5), interval)]
+
+                for target_val in dynamic_vals:
+                    lines = cont_gen.lines(target_val)
+                    segments = []
+                    for line_array in lines:
+                        if len(line_array) >= 2:
+                            pts = []
+                            for pt in line_array:
+                                lng = float(pt[0])
+                                lat = float(pt[1])
+                                if lng > 180.0:
+                                    lng = 180.0
+                                pts.append([round(lng, 4), round(lat, 4)])
+
+                            all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
+                            all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
+
+                            if not all_on_left and not all_on_right:
+                                segments.append(pts)
+
+                    if segments:
+                        features.append({
+                            "type": "Feature",
+                            "geometry": {"type": "MultiLineString", "coordinates": segments},
+                            "properties": {
+                                "name": f"{target_val:g}{' dam' if c_def.get('unit') == 'dam' else ''}",
+                                "color": c_def["color"],
+                                "width": c_def["width"],
+                                "opacity": c_def["opacity"]
+                            }
+                        })
+                continue
+
+            target_val = float(c_def["target"])
             lines = cont_gen.lines(target_val)
-            
+
             segments = []
             for line_array in lines:
                 if len(line_array) >= 2:
@@ -100,10 +171,10 @@ def extract_contour_geojson(raw_arr_k, contours_config=None):
                         if lng > 180.0:
                             lng = 180.0
                         pts.append([round(lng, 4), round(lat, 4)])
-                    
+
                     all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
                     all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
-                    
+
                     if not all_on_left and not all_on_right:
                         segments.append(pts)
 
@@ -185,7 +256,11 @@ def process_grib_to_array(grib_path, param_config):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
-    contour_geojson = extract_contour_geojson(raw_arr_k, param_config.get("contours", []))
+    contour_geojson = extract_contour_geojson(
+        raw_arr_k,
+        param_config.get("contours", []),
+        param_config.get("contours_settings")
+    )
 
     # 🌟 Dynamic normalization based on JSON config
     arr_8bit = normalize_array(raw_arr_k, param_config)

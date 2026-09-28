@@ -91,7 +91,23 @@
         "val_points": [0.0, 3.0, 80.0],
         "byte_points": [0, 30, 107]
       },
-      "contours": [],
+      "contours_settings": {
+        "blur_kernel": [3, 3],
+        "blur_sigma": 0.9,
+        "coarsen_stride": 2
+      },
+      "contours": [
+        {
+          "id": "z500_6dam",
+          "name": "500mb Height (6 dam)",
+          "color": "#8ecae6",
+          "width": 1.4,
+          "opacity": 0.88,
+          "interval": 6.0,
+          "dynamic": true,
+          "unit": "dam"
+        }
+      ],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
         "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
