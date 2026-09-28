@@ -79,17 +79,17 @@
     },
     "pva": {
       "id": "pva",
-      "name": "500mb PVA",
-      "grib_param": "vo",
+      "name": "500mb Height",
+      "grib_param": "z",
       "levtype": "pl",
       "levelist": 500,
       "type": "fc",
-      "unit": "10⁻⁵ s⁻¹",
+      "unit": "dam",
       "scaling": {
         "mode": "piecewise",
-        "unit_multiplier": 100000.0,
-        "val_points": [0.0, 3.0, 80.0],
-        "byte_points": [0, 30, 107]
+        "unit_multiplier": 0.1,
+        "val_points": [480.0, 540.0, 600.0],
+        "byte_points": [0, 128, 255]
       },
       "contours_settings": {
         "blur_kernel": [3, 3],
@@ -100,9 +100,9 @@
         {
           "id": "z500_6dam",
           "name": "500mb Height (6 dam)",
-          "color": "#8ecae6",
-          "width": 1.4,
-          "opacity": 0.88,
+          "color": "#000000",
+          "width": 1.5,
+          "opacity": 0.9,
           "interval": 6.0,
           "dynamic": true,
           "unit": "dam"

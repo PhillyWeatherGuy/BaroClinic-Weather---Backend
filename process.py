@@ -256,6 +256,9 @@ def process_grib_to_array(grib_path, param_config):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
+    if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
+        raw_arr_k = raw_arr_k * 0.1
+
     contour_geojson = extract_contour_geojson(
         raw_arr_k,
         param_config.get("contours", []),
