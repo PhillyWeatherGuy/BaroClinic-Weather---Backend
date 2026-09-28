@@ -79,17 +79,23 @@
     },
     "pva": {
       "id": "pva",
-      "name": "500mb Height",
-      "grib_param": "z",
+      "name": "500mb Height & Vort",
+      "grib_param": "vo",
       "levtype": "pl",
       "levelist": 500,
       "type": "fc",
-      "unit": "dam",
+      "unit": "10^-5 s^-1",
       "scaling": {
         "mode": "piecewise",
-        "unit_multiplier": 1.0,
-        "val_points": [480.0, 540.0, 600.0],
-        "byte_points": [0, 128, 255]
+        "unit_multiplier": 100000.0,
+        "val_points": [0.0, 3.0, 80.0],
+        "byte_points": [0, 30, 107]
+      },
+      "contour_source": {
+        "grib_param": "z",
+        "levtype": "pl",
+        "levelist": 500,
+        "unit": "dam"
       },
       "contours_settings": {
         "blur_kernel": [3, 3],

@@ -255,9 +255,39 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     try:
         client.retrieve(**retrieve_kwargs)
         if os.path.exists(grib_file):
-            frame_arr, contour_geojson = process_grib_to_array(grib_file, param_config)
+            contour_source = param_config.get("contour_source")
+            raster_config = {**param_config, "contours": []} if contour_source else param_config
+            frame_arr, contour_geojson = process_grib_to_array(grib_file, raster_config)
             try: os.remove(grib_file)
             except Exception: pass
+
+            if contour_source:
+                contour_grib_file = patterns["grib"].format(
+                    model=model_name,
+                    param=f"{param_config['id']}_z500",
+                    step=step
+                )
+                contour_retrieve_kwargs = dict(retrieve_kwargs)
+                contour_retrieve_kwargs.update({
+                    "param": [contour_source["grib_param"]],
+                    "levtype": contour_source.get("levtype", param_config.get("levtype", "pl")),
+                    "target": contour_grib_file
+                })
+                if "levelist" in contour_source:
+                    contour_retrieve_kwargs["levelist"] = contour_source["levelist"]
+
+                try:
+                    client.retrieve(**contour_retrieve_kwargs)
+                    if os.path.exists(contour_grib_file):
+                        contour_param_config = {**param_config, **contour_source}
+                        _, contour_geojson = process_grib_to_array(contour_grib_file, contour_param_config)
+                except Exception as e:
+                    print(f"  ❌ [{param_config['id']}] Height contour error F{step:03d}: {e}")
+                finally:
+                    if os.path.exists(contour_grib_file):
+                        try: os.remove(contour_grib_file)
+                        except Exception: pass
+
             print(f"  ⚡ [{param_config['id']}] Processed F{step:03d}")
             return step, frame_arr, contour_geojson
     except Exception as e:
