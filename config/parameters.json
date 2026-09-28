@@ -111,10 +111,10 @@
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
         "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
-        "run_contours": "{model}_{param}_{date}_{run}z_contours.json",
-        "latest_contours": "{model}_{param}_contours.json",
-        "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
-        "latest_manifest": "{model}_{param}_manifest.json"
+        "run_contours": "{model}_z500_{date}_{run}z_contours.json",
+        "latest_contours": "{model}_z500_contours.json",
+        "run_manifest": "{model}_z500_{date}_{run}z_manifest.json",
+        "latest_manifest": "{model}_z500_manifest.json"
       }
     }
   }
