@@ -191,15 +191,14 @@ def encode_contours_binary(contours_by_step):
             lines = feature.get("geometry", {}).get("coordinates", [])
             stream.extend(struct.pack("<I", len(lines)))
             for line in lines:
-                points = [
-                    (round(point[0] * CONTOUR_COORD_SCALE), round(point[1] * CONTOUR_COORD_SCALE))
-                    for point in line
-                ]
+                points = np.rint(np.asarray(line, dtype=np.float64) * CONTOUR_COORD_SCALE).astype(np.int32)
+                deltas = np.diff(
+                    points,
+                    axis=0,
+                    prepend=np.zeros((1, 2), dtype=np.int32),
+                )
                 stream.extend(struct.pack("<I", len(points)))
-                previous_x = previous_y = 0
-                for point_x, point_y in points:
-                    stream.extend(struct.pack("<ii", point_x - previous_x, point_y - previous_y))
-                    previous_x, previous_y = point_x, point_y
+                stream.extend(deltas.astype("<i4", copy=False).tobytes())
         metadata_by_step[str(step)] = metadata
 
     return bytes(stream), metadata_by_step
@@ -528,10 +527,11 @@ def run_master_pipeline(selected_param_key="2t"):
         "scale": CONTOUR_COORD_SCALE,
         "file": run_binary_filename,
     }
+    compressed_contours = gzip.compress(contour_binary, compresslevel=6)
     with open(os.path.join(output_dist_dir, run_contour_filename), 'w') as f:
         json.dump(master_contours, f)
     with open(os.path.join(output_dist_dir, run_binary_filename), "wb") as f:
-        f.write(gzip.compress(contour_binary, compresslevel=6))
+        f.write(compressed_contours)
 
     latest_contour_filename = patterns["latest_contours"].format(
         model=MODEL_NAME, param=param_config["id"]
@@ -541,7 +541,7 @@ def run_master_pipeline(selected_param_key="2t"):
     with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
     with open(os.path.join(output_dist_dir, latest_binary_filename), "wb") as f:
-        f.write(gzip.compress(contour_binary, compresslevel=6))
+        f.write(compressed_contours)
 
     chunks, frame_w, frame_h = build_volume_chunks(
         frame_arrays, 
