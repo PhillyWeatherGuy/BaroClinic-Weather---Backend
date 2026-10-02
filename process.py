@@ -15,6 +15,7 @@ from rasterio.enums import Resampling
 import boto3
 import contourpy
 import gzip  # 🌟 Built-in gzip for binary buffer support
+import struct
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
@@ -28,6 +29,7 @@ MAX_CONCURRENT_WORKERS = 4
 MAX_CONCURRENT_PARAMS = 2
 
 CONFIG_FILE_PATH = os.path.join("config", "parameters.json")
+CONTOUR_COORD_SCALE = 1000
 
 
 def load_parameter_config(param_key="2t"):
@@ -166,6 +168,41 @@ def extract_contour_geojson(raw_arr_k, contours_config=None, contour_settings=No
     except Exception as e:
         print(f"  ❌ Contour extraction exception: {e}")
         return {"type": "FeatureCollection", "features": []}
+
+
+def encode_contours_binary(contours_by_step):
+    """Encode quantized contour lines as per-line delta coordinates."""
+    stream = bytearray(b"CTV1")
+    stream.extend(struct.pack("<I", len(contours_by_step)))
+    metadata_by_step = {}
+
+    for step, collection in sorted(contours_by_step.items()):
+        features = collection.get("features", [])
+        stream.extend(struct.pack("<II", int(step), len(features)))
+        metadata = []
+        for feature in features:
+            properties = feature.get("properties", {})
+            metadata.append({
+                "name": properties.get("name", ""),
+                "color": properties.get("color", "#000000"),
+                "width": properties.get("width", 1.6),
+                "opacity": properties.get("opacity", 0.9),
+            })
+            lines = feature.get("geometry", {}).get("coordinates", [])
+            stream.extend(struct.pack("<I", len(lines)))
+            for line in lines:
+                points = [
+                    (round(point[0] * CONTOUR_COORD_SCALE), round(point[1] * CONTOUR_COORD_SCALE))
+                    for point in line
+                ]
+                stream.extend(struct.pack("<I", len(points)))
+                previous_x = previous_y = 0
+                for point_x, point_y in points:
+                    stream.extend(struct.pack("<ii", point_x - previous_x, point_y - previous_y))
+                    previous_x, previous_y = point_x, point_y
+        metadata_by_step[str(step)] = metadata
+
+    return bytes(stream), metadata_by_step
 
 
 def normalize_array(raw_arr, param_config):
@@ -465,18 +502,46 @@ def run_master_pipeline(selected_param_key="2t"):
         "date": target_date,
         "steps": populated_steps
     }
+    contour_binary, contour_metadata = encode_contours_binary(populated_steps)
+    manifest_steps = {
+        step: {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "MultiLineString", "coordinates": []},
+                    "properties": properties,
+                }
+                for properties in contour_metadata[step]
+            ],
+        }
+        for step in contour_metadata
+    }
+    master_contours["steps"] = manifest_steps
 
     run_contour_filename = patterns["run_contours"].format(
         model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
+    run_binary_filename = run_contour_filename.replace(".json", ".bin.gz")
+    master_contours["binary"] = {
+        "format": "CTV1",
+        "scale": CONTOUR_COORD_SCALE,
+        "file": run_binary_filename,
+    }
     with open(os.path.join(output_dist_dir, run_contour_filename), 'w') as f:
         json.dump(master_contours, f)
+    with open(os.path.join(output_dist_dir, run_binary_filename), "wb") as f:
+        f.write(gzip.compress(contour_binary, compresslevel=6))
 
     latest_contour_filename = patterns["latest_contours"].format(
         model=MODEL_NAME, param=param_config["id"]
     )
+    latest_binary_filename = latest_contour_filename.replace(".json", ".bin.gz")
+    master_contours["binary"]["file"] = latest_binary_filename
     with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
+    with open(os.path.join(output_dist_dir, latest_binary_filename), "wb") as f:
+        f.write(gzip.compress(contour_binary, compresslevel=6))
 
     chunks, frame_w, frame_h = build_volume_chunks(
         frame_arrays, 
