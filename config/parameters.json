@@ -61,6 +61,11 @@
       "levtype": "sfc",
       "type": "fc",
       "unit": "in/hr",
+      "ptype_source": {
+        "grib_param": "ptype",
+        "levtype": "sfc",
+        "type": "fc"
+      },
       "scaling": {
         "mode": "piecewise",
         "unit_multiplier": 141.7322834646,

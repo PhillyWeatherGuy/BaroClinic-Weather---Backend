@@ -291,6 +291,9 @@ def process_grib_to_array(grib_path, param_config, want_raster=True):
     raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
+    if param_config.get("category_mode"):
+        return np.nan_to_num(raw_arr_k, nan=0.0).clip(0, 255).astype(np.uint8), []
+
     if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
         raw_arr_k = raw_arr_k / 98.0665
 
@@ -329,8 +332,31 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
             contour_source = param_config.get("contour_source")
             raster_config = {**param_config, "contours": []} if contour_source else param_config
             frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config)
+            ptype_arr = None
             try: os.remove(grib_file)
             except Exception: pass
+
+            ptype_source = param_config.get("ptype_source")
+            if ptype_source:
+                ptype_file = f"{model_name}_{param_config['id']}_ptype_{step:03d}.grib2"
+                ptype_retrieve_kwargs = dict(retrieve_kwargs)
+                ptype_retrieve_kwargs.update({
+                    "param": [ptype_source["grib_param"]],
+                    "levtype": ptype_source.get("levtype", "sfc"),
+                    "type": ptype_source.get("type", param_config.get("type", "fc")),
+                    "target": ptype_file,
+                })
+                try:
+                    client.retrieve(**ptype_retrieve_kwargs)
+                    if os.path.exists(ptype_file):
+                        ptype_config = {**ptype_source, "category_mode": True}
+                        ptype_arr, _ = process_grib_to_array(ptype_file, ptype_config)
+                except Exception as e:
+                    print(f"  ⚠️ [{param_config['id']}] Precipitation type unavailable F{step:03d}: {e}")
+                finally:
+                    if os.path.exists(ptype_file):
+                        try: os.remove(ptype_file)
+                        except Exception: pass
 
             if contour_source:
                 contour_grib_file = patterns["grib"].format(
@@ -366,16 +392,16 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
             packed = pack_step(contour_levels)
 
             print(f"  ⚡ [{param_config['id']}] Processed F{step:03d}")
-            return step, frame_arr, packed
+            return step, frame_arr, packed, ptype_arr
     except Exception as e:
         print(f"  ❌ [{param_config['id']}] Error processing F{step:03d}: {e}")
         if os.path.exists(grib_file):
             try: os.remove(grib_file)
             except Exception: pass
-    return step, None, None
+    return step, None, None, None
 
 
-def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run):
+def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run, ptype_arrays=None):
     """
     🌟 Builds contiguous 3D binary time-volume chunks [T, H, W]
     Preserves native resolution without 2D sprite edge bleeding.
@@ -393,6 +419,7 @@ def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, t
     for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_volume)):
         chunk_frames = frame_arrays[i:i + frames_per_volume]
         chunk_steps = steps_written[i:i + frames_per_volume]
+        chunk_ptype = ptype_arrays[i:i + frames_per_volume] if ptype_arrays else None
 
         # Contiguous 3D stack of frames [T, H, W]
         volume_arr = np.stack(chunk_frames, axis=0).astype(np.uint8)
@@ -405,14 +432,20 @@ def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, t
             chunk_idx=chunk_idx
         )
 
-        chunks.append({
+        chunk_manifest = {
+            "file": volume_filename,
+            "forecast_steps": chunk_steps,
+            "frame_count": len(chunk_frames)
+        }
+        chunk_entry = {
             "array": volume_arr,
-            "manifest_data": {
-                "file": volume_filename,
-                "forecast_steps": chunk_steps,
-                "frame_count": len(chunk_frames)
-            }
-        })
+            "manifest_data": chunk_manifest
+        }
+        if chunk_ptype and all(frame is not None for frame in chunk_ptype):
+            ptype_filename = volume_filename.replace("_volume_", "_ptype_volume_")
+            chunk_entry["ptype_array"] = np.stack(chunk_ptype, axis=0).astype(np.uint8)
+            chunk_manifest["ptype_file"] = ptype_filename
+        chunks.append(chunk_entry)
 
     return chunks, frame_w, frame_h
 
@@ -518,6 +551,7 @@ def run_master_pipeline(selected_param_key="2t"):
 
     results = {}
     contour_steps = {}
+    ptype_results = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         future_to_step = {
@@ -525,14 +559,17 @@ def run_master_pipeline(selected_param_key="2t"):
             for step in FORECAST_STEPS
         }
         for future in concurrent.futures.as_completed(future_to_step):
-            step, arr, packed = future.result()
+            step, arr, packed, ptype_arr = future.result()
             if arr is not None:
                 results[step] = arr
                 if packed and packed["props"]:
                     contour_steps[step] = packed
+                if ptype_arr is not None:
+                    ptype_results[step] = ptype_arr
 
     sorted_steps = sorted(results.keys())
     frame_arrays = [results[s] for s in sorted_steps]
+    ptype_arrays = [ptype_results.get(s) for s in sorted_steps]
     steps_written = sorted_steps
 
     if not frame_arrays:
@@ -594,7 +631,8 @@ def run_master_pipeline(selected_param_key="2t"):
         model_name=MODEL_NAME,
         param_config=param_config,
         target_date=target_date,
-        chosen_run=CHOSEN_RUN
+        chosen_run=CHOSEN_RUN,
+        ptype_arrays=ptype_arrays if ptype_results else None
     )
 
     manifest_chunks = []
@@ -607,6 +645,10 @@ def run_master_pipeline(selected_param_key="2t"):
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
                 f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=9))
+            ptype_filename = chunk["manifest_data"].get("ptype_file")
+            if ptype_filename and "ptype_array" in chunk:
+                with open(os.path.join(output_dist_dir, ptype_filename), "wb") as ptype_file:
+                    ptype_file.write(gzip.compress(chunk["ptype_array"].tobytes(), compresslevel=9))
         elif filename.endswith(".webp"):
             cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
         else:
