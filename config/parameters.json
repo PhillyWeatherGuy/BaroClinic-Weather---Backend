@@ -57,7 +57,7 @@
     "prate": {
       "id": "prate",
       "name": "Surface Precipitation Rate",
-      "grib_param": "prate",
+      "grib_param": "tprate",
       "levtype": "sfc",
       "type": "fc",
       "unit": "mm/hr",
