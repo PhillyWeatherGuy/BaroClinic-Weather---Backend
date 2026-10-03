@@ -104,6 +104,20 @@ PRECIP_CONFIGS = {
     }
 }
 
+PRECIP_CONFIGS["Surface_Precip_Rate"] = {
+    "levels": [0.0, 0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 16.0, 20.0, 24.0, 30.0, 200.0],
+    "DARK": {"hex_colors": [
+        "#bebebe", "#a3ccb5", "#76c296", "#4cb377", "#22c55e", "#15803d", "#14532d",
+        "#ffd700", "#ffaa00", "#ff7700", "#ff007f", "#ff0055", "#ff0033", "#d500f9",
+        "#aa00ff", "#7c00ea", "#311b92", "#1a237e", "#01030a"
+    ]},
+    "LIGHT": {"hex_colors": [
+        "#bebebe", "#a3ccb5", "#76c296", "#4cb377", "#22c55e", "#15803d", "#14532d",
+        "#ffd700", "#ffaa00", "#ff7700", "#ff007f", "#ff0055", "#ff0033", "#d500f9",
+        "#aa00ff", "#7c00ea", "#311b92", "#1a237e", "#01030a"
+    ]}
+}
+
 # 🌡️ THERMODYNAMIC & SURFACE CONFIGS
 THERMO_CONFIGS = {
     "TMP_2m": {
