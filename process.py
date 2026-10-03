@@ -14,13 +14,14 @@ import rioxarray
 from rasterio.enums import Resampling
 import boto3
 import contourpy
-import gzip  # 🌟 Built-in gzip for binary buffer support
+import gzip
 import struct
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
 
-MAX_FORECAST_HOURS = 360
-FORECAST_STEPS = [h for h in range(0, MAX_FORECAST_HOURS + 1) if h % 3 == 0]
+# ECMWF open data (0p25 IFS): 3-hourly to 144h, then 6-hourly to 360h.
+# Requesting anything else (e.g. 147, 153, ...) just returns a 404.
+FORECAST_STEPS = list(range(0, 145, 3)) + list(range(150, 361, 6))
 
 MAX_TEXTURE_SIZE = 4096
 
@@ -29,7 +30,10 @@ MAX_CONCURRENT_WORKERS = 4
 MAX_CONCURRENT_PARAMS = 2
 
 CONFIG_FILE_PATH = os.path.join("config", "parameters.json")
-CONTOUR_COORD_SCALE = 1000
+
+CONTOUR_COORD_SCALE = 1000          # stored as integer thousandths of a degree
+CONTOUR_FORMAT = "CTV2"
+INT16_MAX = 32767
 
 
 def load_parameter_config(param_key="2t"):
@@ -45,33 +49,109 @@ def load_parameter_config(param_key="2t"):
     raise FileNotFoundError(f"Parameter '{param_key}' not found in {CONFIG_FILE_PATH}")
 
 
-def split_path_at_dateline(vertices, max_jump=180.0):
-    if len(vertices) < 2:
-        return []
+# ---------------------------------------------------------------------------
+# Contours: vectorized extraction + CTV2 binary packing
+#
+# Per level the payload is (all little-endian):
+#   uint32  n_lines
+#   uint32  lens[n_lines]        points per line
+#   int32   start_x[n_lines]     absolute first vertex of each line (x1000)
+#   int32   start_y[n_lines]
+#   int16   dx[sum(lens)-n]      per-vertex deltas, all X first ...
+#   int16   dy[sum(lens)-n]      ... then all Y
+# Every block is a multiple of 4 bytes, so typed arrays stay aligned in JS.
+# ---------------------------------------------------------------------------
 
-    split_paths = []
-    current_path = [vertices[0]]
+def _pack_level(cont_gen, level):
+    """Contour one level and return packed bytes, or None if nothing to draw."""
+    pts_list, off_list = cont_gen.lines(level)
+    pts, off = pts_list[0], off_list[0]
+    if pts is None or off is None or len(off) < 2:
+        return None
 
-    for i in range(1, len(vertices)):
-        prev_pt = vertices[i - 1]
-        curr_pt = vertices[i]
+    off = off.astype(np.intp)
+    lens = np.diff(off)
+    starts = off[:-1]
 
-        if abs(curr_pt[0] - prev_pt[0]) > max_jump:
-            if len(current_path) >= 2:
-                split_paths.append(current_path)
-            current_path = [curr_pt]
-        else:
-            current_path.append(curr_pt)
+    # Clamp the wrap-around column to 180, then drop lines lying entirely on a seam.
+    x = np.minimum(pts[:, 0], 180.0)
+    seam = (np.maximum.reduceat(x, starts) < -179.99) | (np.minimum.reduceat(x, starts) > 179.99)
 
-    if len(current_path) >= 2:
-        split_paths.append(current_path)
+    q = np.empty((len(pts), 2), dtype=np.int32)
+    q[:, 0] = np.rint(x * CONTOUR_COORD_SCALE)
+    q[:, 1] = np.rint(pts[:, 1] * CONTOUR_COORD_SCALE)
 
-    return split_paths
+    keep_line = ~seam
+    if not keep_line.all():
+        q = q[np.repeat(keep_line, lens)]
+        lens = lens[keep_line]
+    if len(lens) == 0:
+        return None
+
+    n = len(q)
+    is_start = np.zeros(n, dtype=bool)
+    is_start[np.cumsum(lens) - lens] = True
+
+    # Safety net: if two neighbouring vertices are too far apart for int16,
+    # start a new line there instead of overflowing.
+    if n > 1:
+        is_start[1:] |= (np.abs(np.diff(q, axis=0)) > INT16_MAX).any(axis=1)
+
+    seg_starts = np.flatnonzero(is_start)
+    seg_lens = np.diff(np.append(seg_starts, n))
+
+    keep_seg = seg_lens >= 2
+    if not keep_seg.all():
+        q = q[np.repeat(keep_seg, seg_lens)]
+        seg_lens = seg_lens[keep_seg]
+        seg_starts = np.cumsum(seg_lens) - seg_lens
+        if len(seg_lens) == 0:
+            return None
+        is_start = np.zeros(len(q), dtype=bool)
+        is_start[seg_starts] = True
+
+    deltas = np.diff(q, axis=0)
+    inner = ~is_start[1:]
+    dx = deltas[inner, 0].astype("<i2")
+    dy = deltas[inner, 1].astype("<i2")
+
+    return b"".join((
+        struct.pack("<I", len(seg_lens)),
+        seg_lens.astype("<u4").tobytes(),
+        q[seg_starts, 0].astype("<i4").tobytes(),
+        q[seg_starts, 1].astype("<i4").tobytes(),
+        dx.tobytes(),
+        dy.tobytes(),
+    ))
 
 
-def extract_contour_geojson(raw_arr_k, contours_config=None, contour_settings=None):
+def _level_style(level, contours_config):
+    """Name/color/width/opacity for a level (same rules as before, computed once per level)."""
+    name = str(level)
+    for c_def in contours_config:
+        if c_def.get("dynamic") and c_def.get("unit") == "dam":
+            name = str(int(level)) if float(level).is_integer() else str(level)
+            break
+
+    match = next(
+        (c for c in contours_config if c.get("dynamic") or c.get("target") == level),
+        {},
+    )
+    return {
+        "name": name,
+        "color": match.get("color", "#000000"),
+        "width": match.get("width", 1.6),
+        "opacity": match.get("opacity", 0.9),
+    }
+
+
+def extract_contour_levels(raw_arr_k, contours_config=None, contour_settings=None):
+    """
+    Returns a list of {"props": {...}, "payload": bytes}, one per contour level that has lines.
+    No GeoJSON and no per-point Python loops.
+    """
     if not contours_config:
-        return {"type": "FeatureCollection", "features": []}
+        return []
 
     try:
         contour_settings = contour_settings or {}
@@ -95,9 +175,11 @@ def extract_contour_geojson(raw_arr_k, contours_config=None, contour_settings=No
         lon_step = 360.0 / frame_w
         lons = np.linspace(-180.0, 180.0 + lon_step, frame_w + 1)
         lats = np.linspace(-90.0, 90.0, frame_h)
-        cont_gen = contourpy.contour_generator(x=lons, y=lats, z=smoothed_cyclic)
+        cont_gen = contourpy.contour_generator(
+            x=lons, y=lats, z=smoothed_cyclic,
+            line_type=contourpy.LineType.ChunkCombinedOffset,
+        )
 
-        features = []
         interval = 6.0
         explicit_levels = []
 
@@ -121,87 +203,40 @@ def extract_contour_geojson(raw_arr_k, contours_config=None, contour_settings=No
                 explicit_levels.append(float(c_def["target"]))
 
         if not explicit_levels:
-            return {"type": "FeatureCollection", "features": []}
+            return []
 
+        levels = []
         for target_val in sorted(set(explicit_levels)):
-            lines = cont_gen.lines(target_val)
-            segments = []
-            for line_array in lines:
-                if len(line_array) < 2:
-                    continue
-                pts = []
-                for pt in line_array:
-                    lng = float(pt[0])
-                    lat = float(pt[1])
-                    if lng > 180.0:
-                        lng = 180.0
-                    pts.append([round(lng, 4), round(lat, 4)])
+            payload = _pack_level(cont_gen, target_val)
+            if payload is not None:
+                levels.append({"props": _level_style(target_val, contours_config), "payload": payload})
 
-                all_on_left = all(abs(p[0] - (-180.0)) < 0.01 for p in pts)
-                all_on_right = all(abs(p[0] - 180.0) < 0.01 for p in pts)
-                if not all_on_left and not all_on_right:
-                    segments.append(pts)
-
-            if segments:
-                name = str(target_val)
-                for c_def in contours_config:
-                    if c_def.get("dynamic") and c_def.get("unit") == "dam":
-                        name = str(int(target_val)) if float(target_val).is_integer() else str(target_val)
-                        break
-                features.append({
-                    "type": "Feature",
-                    "geometry": {"type": "MultiLineString", "coordinates": segments},
-                    "properties": {
-                        "name": name,
-                        "color": next((c_def["color"] for c_def in contours_config if c_def.get("dynamic") or c_def.get("target") == target_val), "#000000"),
-                        "width": next((c_def["width"] for c_def in contours_config if c_def.get("dynamic") or c_def.get("target") == target_val), 1.6),
-                        "opacity": next((c_def["opacity"] for c_def in contours_config if c_def.get("dynamic") or c_def.get("target") == target_val), 0.9)
-                    }
-                })
-
-        if not features:
-            print(f"  ⚠️ Note: 0 contour feature sets generated.")
-            return {"type": "FeatureCollection", "features": []}
-
-        print(f"  ✨ Generated {len(features)} contour feature set(s)")
-        return {"type": "FeatureCollection", "features": features}
+        if not levels:
+            print("  ⚠️ Note: 0 contour feature sets generated.")
+        else:
+            print(f"  ✨ Generated {len(levels)} contour feature set(s)")
+        return levels
     except Exception as e:
         print(f"  ❌ Contour extraction exception: {e}")
-        return {"type": "FeatureCollection", "features": []}
+        return []
 
 
-def encode_contours_binary(contours_by_step):
-    """Encode quantized contour lines as per-line delta coordinates."""
-    stream = bytearray(b"CTV1")
-    stream.extend(struct.pack("<I", len(contours_by_step)))
-    metadata_by_step = {}
+def pack_step(levels):
+    """Concatenate one step's level payloads (runs inside the worker thread)."""
+    return {
+        "blob": b"".join(l["payload"] for l in levels),
+        "props": [l["props"] for l in levels],
+    }
 
-    for step, collection in sorted(contours_by_step.items()):
-        features = collection.get("features", [])
-        stream.extend(struct.pack("<II", int(step), len(features)))
-        metadata = []
-        for feature in features:
-            properties = feature.get("properties", {})
-            metadata.append({
-                "name": properties.get("name", ""),
-                "color": properties.get("color", "#000000"),
-                "width": properties.get("width", 1.6),
-                "opacity": properties.get("opacity", 0.9),
-            })
-            lines = feature.get("geometry", {}).get("coordinates", [])
-            stream.extend(struct.pack("<I", len(lines)))
-            for line in lines:
-                points = np.rint(np.asarray(line, dtype=np.float64) * CONTOUR_COORD_SCALE).astype(np.int32)
-                deltas = np.diff(
-                    points,
-                    axis=0,
-                    prepend=np.zeros((1, 2), dtype=np.int32),
-                )
-                stream.extend(struct.pack("<I", len(points)))
-                stream.extend(deltas.astype("<i4", copy=False).tobytes())
-        metadata_by_step[str(step)] = metadata
 
-    return bytes(stream), metadata_by_step
+def assemble_contour_file(steps):
+    """steps: {step_int: {"blob": bytes, "props": [...]}} -> full CTV2 file bytes."""
+    parts = [CONTOUR_FORMAT.encode("ascii"), struct.pack("<I", len(steps))]
+    for step in sorted(steps):
+        entry = steps[step]
+        parts.append(struct.pack("<III", int(step), len(entry["props"]), len(entry["blob"])))
+        parts.append(entry["blob"])
+    return b"".join(parts)
 
 
 def normalize_array(raw_arr, param_config):
@@ -225,7 +260,7 @@ def normalize_array(raw_arr, param_config):
         # Standard Linear Scaling (Temperature, Wind, Pressure, etc.)
         min_v = scaling.get("min_val", param_config.get("min_val", 0.0))
         max_v = scaling.get("max_val", param_config.get("max_val", 255.0))
-        
+
         arr = np.nan_to_num(raw_arr, copy=False, nan=min_v)
         np.clip(arr, min_v, max_v, out=arr)
         arr -= min_v
@@ -234,16 +269,16 @@ def normalize_array(raw_arr, param_config):
         return arr.astype(np.uint8)
 
 
-def process_grib_to_array(grib_path, param_config):
+def process_grib_to_array(grib_path, param_config, want_raster=True):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
-    
+
     if 'lon' in ds.coords:
         ds = ds.rename({'lon': 'longitude'})
     if 'lat' in ds.coords:
         ds = ds.rename({'lat': 'latitude'})
 
     ds = ds.sortby('latitude', ascending=False)
-    
+
     if ds.longitude.max() > 180:
         ds = ds.assign_coords(
             longitude=(((ds.longitude + 180) % 360) - 180)
@@ -259,16 +294,16 @@ def process_grib_to_array(grib_path, param_config):
     if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
         raw_arr_k = raw_arr_k / 98.0665
 
-    contour_geojson = extract_contour_geojson(
+    contour_levels = extract_contour_levels(
         raw_arr_k,
         param_config.get("contours", []),
         param_config.get("contours_settings")
     )
 
-    # 🌟 Dynamic normalization based on JSON config
-    arr_8bit = normalize_array(raw_arr_k, param_config)
+    # Contour-only GRIBs (e.g. z500 lines over a pva raster) skip the 8-bit conversion.
+    arr_8bit = normalize_array(raw_arr_k, param_config) if want_raster else None
 
-    return arr_8bit, contour_geojson
+    return arr_8bit, contour_levels
 
 
 def fetch_and_process_step(client, target_date, chosen_run, step, param_config, model_name):
@@ -293,7 +328,7 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
         if os.path.exists(grib_file):
             contour_source = param_config.get("contour_source")
             raster_config = {**param_config, "contours": []} if contour_source else param_config
-            frame_arr, contour_geojson = process_grib_to_array(grib_file, raster_config)
+            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config)
             try: os.remove(grib_file)
             except Exception: pass
 
@@ -316,7 +351,9 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                     client.retrieve(**contour_retrieve_kwargs)
                     if os.path.exists(contour_grib_file):
                         contour_param_config = {**param_config, **contour_source}
-                        _, contour_geojson = process_grib_to_array(contour_grib_file, contour_param_config)
+                        _, contour_levels = process_grib_to_array(
+                            contour_grib_file, contour_param_config, want_raster=False
+                        )
                 except Exception as e:
                     print(f"  ❌ [{param_config['id']}] Height contour error F{step:03d}: {e}")
                 finally:
@@ -324,8 +361,12 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                         try: os.remove(contour_grib_file)
                         except Exception: pass
 
+            # Pack contour bytes here, in the worker thread, so the end of the pipeline
+            # only has to concatenate.
+            packed = pack_step(contour_levels)
+
             print(f"  ⚡ [{param_config['id']}] Processed F{step:03d}")
-            return step, frame_arr, contour_geojson
+            return step, frame_arr, packed
     except Exception as e:
         print(f"  ❌ [{param_config['id']}] Error processing F{step:03d}: {e}")
         if os.path.exists(grib_file):
@@ -348,11 +389,11 @@ def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, t
     chunks = []
     patterns = param_config["filename_patterns"]
     pattern_key = "volume" if "volume" in patterns else "spritesheet"
-    
+
     for chunk_idx, i in enumerate(range(0, len(frame_arrays), frames_per_volume)):
         chunk_frames = frame_arrays[i:i + frames_per_volume]
         chunk_steps = steps_written[i:i + frames_per_volume]
-        
+
         # Contiguous 3D stack of frames [T, H, W]
         volume_arr = np.stack(chunk_frames, axis=0).astype(np.uint8)
 
@@ -363,7 +404,7 @@ def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, t
             run=chosen_run,
             chunk_idx=chunk_idx
         )
-        
+
         chunks.append({
             "array": volume_arr,
             "manifest_data": {
@@ -377,7 +418,14 @@ def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, t
 
 
 def upload_single_file(s3_client, bucket_name, filepath, filename):
-    content_type = "application/json" if filename.endswith(".json") else ("application/octet-stream" if filename.endswith(".bin") else "image/png")
+    if filename.endswith(".json"):
+        content_type = "application/json"
+    elif filename.endswith(".gz"):
+        content_type = "application/gzip"
+    elif filename.endswith(".bin"):
+        content_type = "application/octet-stream"
+    else:
+        content_type = "image/png"
     try:
         with open(filepath, 'rb') as f:
             s3_client.put_object(
@@ -414,8 +462,10 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         if os.path.isfile(os.path.join(folder_path, fname))
     ]
 
-    asset_files = [f for f in all_files if not f.endswith('manifest.json')]
-    manifest_files = [f for f in all_files if f.endswith('manifest.json')]
+    # Binaries first, then every .json (manifests and the "latest" contour pointer),
+    # so a pointer never goes live before the file it references.
+    asset_files = [f for f in all_files if not f.endswith('.json')]
+    json_files = [f for f in all_files if f.endswith('.json')]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         futures = [
@@ -427,7 +477,7 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = [
             executor.submit(upload_single_file, s3_client, bucket_name, os.path.join(folder_path, fname), fname)
-            for fname in manifest_files
+            for fname in json_files
         ]
         concurrent.futures.wait(futures)
 
@@ -467,7 +517,7 @@ def run_master_pipeline(selected_param_key="2t"):
     os.makedirs(output_dist_dir, exist_ok=True)
 
     results = {}
-    contours_dict = {}
+    contour_steps = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_CONCURRENT_WORKERS) as executor:
         future_to_step = {
@@ -475,10 +525,11 @@ def run_master_pipeline(selected_param_key="2t"):
             for step in FORECAST_STEPS
         }
         for future in concurrent.futures.as_completed(future_to_step):
-            step, arr, contour_json = future.result()
+            step, arr, packed = future.result()
             if arr is not None:
                 results[step] = arr
-                contours_dict[step] = contour_json
+                if packed and packed["props"]:
+                    contour_steps[step] = packed
 
     sorted_steps = sorted(results.keys())
     frame_arrays = [results[s] for s in sorted_steps]
@@ -488,48 +539,45 @@ def run_master_pipeline(selected_param_key="2t"):
         print(f"❌ [{param_config['id']}] No frames processed. Exiting pipeline.")
         return
 
-    populated_steps = {
-        str(step): contours_dict[step] 
-        for step in sorted_steps 
-        if step in contours_dict and contours_dict[step] and len(contours_dict[step].get("features", [])) > 0
-    }
+    # --- Contours: one dated binary + JSON metadata (the "latest" JSON points at the dated binary)
+    contour_binary = assemble_contour_file(contour_steps)
 
     master_contours = {
         "model": MODEL_NAME,
         "parameter": param_config["id"],
         "run": f"{CHOSEN_RUN}z",
         "date": target_date,
-        "steps": populated_steps
+        "steps": {
+            str(step): {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "MultiLineString", "coordinates": []},
+                        "properties": props,
+                    }
+                    for props in contour_steps[step]["props"]
+                ],
+            }
+            for step in sorted(contour_steps)
+        },
     }
-    contour_binary, contour_metadata = encode_contours_binary(populated_steps)
-    manifest_steps = {
-        step: {
-            "type": "FeatureCollection",
-            "features": [
-                {
-                    "type": "Feature",
-                    "geometry": {"type": "MultiLineString", "coordinates": []},
-                    "properties": properties,
-                }
-                for properties in contour_metadata[step]
-            ],
-        }
-        for step in contour_metadata
-    }
-    master_contours["steps"] = manifest_steps
 
     run_contour_filename = patterns["run_contours"].format(
         model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
     run_binary_filename = run_contour_filename.replace(".json", ".bin.gz")
     master_contours["binary"] = {
-        "format": "CTV1",
+        "format": CONTOUR_FORMAT,
         "scale": CONTOUR_COORD_SCALE,
         "file": run_binary_filename,
     }
+
     compressed_contours = gzip.compress(contour_binary, compresslevel=6)
+    print(f"  📦 [{param_config['id']}] Contours: {len(contour_binary)/1e6:.2f} MB raw -> {len(compressed_contours)/1e6:.2f} MB gzip")
+
     with open(os.path.join(output_dist_dir, run_contour_filename), 'w') as f:
-        json.dump(master_contours, f)
+        json.dump(master_contours, f, separators=(",", ":"))
     with open(os.path.join(output_dist_dir, run_binary_filename), "wb") as f:
         f.write(compressed_contours)
 
@@ -537,23 +585,24 @@ def run_master_pipeline(selected_param_key="2t"):
         model=MODEL_NAME, param=param_config["id"]
     )
     with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
-        json.dump(master_contours, f)
+        json.dump(master_contours, f, separators=(",", ":"))
 
+    # --- Raster volume chunks
     chunks, frame_w, frame_h = build_volume_chunks(
-        frame_arrays, 
-        steps_written, 
-        model_name=MODEL_NAME, 
+        frame_arrays,
+        steps_written,
+        model_name=MODEL_NAME,
         param_config=param_config,
-        target_date=target_date, 
+        target_date=target_date,
         chosen_run=CHOSEN_RUN
     )
 
     manifest_chunks = []
-    
+
     for chunk in chunks:
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
-        
+
         # 🌟 Writes Gzip-compressed raw binary buffer
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
@@ -562,7 +611,7 @@ def run_master_pipeline(selected_param_key="2t"):
             cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
         else:
             cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
-            
+
         manifest_chunks.append(chunk["manifest_data"])
 
     manifest = {
@@ -587,7 +636,7 @@ def run_master_pipeline(selected_param_key="2t"):
     run_manifest_filename = patterns["run_manifest"].format(
         model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
     )
-    
+
     manifest_files_to_write = ["manifest.json", run_manifest_filename]
 
     if "latest_manifest" in patterns:
@@ -604,7 +653,7 @@ def run_master_pipeline(selected_param_key="2t"):
     print(f"\n🎉 [{param_config['id']}] Assets ready in {output_dist_dir}/")
 
     upload_to_b2_parallel(output_dist_dir)
-    
+
     try:
         shutil.rmtree(output_dist_dir)
         print(f"  ✅ [{param_config['id']}] Cleanup complete.")
@@ -624,14 +673,14 @@ if __name__ == "__main__":
             target_params = ["2t"]
 
     print(f"🚀 Launching Pipeline for Parameters: {target_params}")
-    
+
     batch_size = MAX_CONCURRENT_PARAMS
 
     for i in range(0, len(target_params), batch_size):
         batch = target_params[i:i + batch_size]
         batch_num = (i // batch_size) + 1
         total_batches = math.ceil(len(target_params) / batch_size)
-        
+
         print(f"\n📦 [Batch {batch_num}/{total_batches}] Running {len(batch)} parameter(s) concurrently: {batch}")
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=len(batch)) as executor:
