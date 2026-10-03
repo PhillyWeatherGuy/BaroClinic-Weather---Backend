@@ -536,12 +536,8 @@ def run_master_pipeline(selected_param_key="2t"):
     latest_contour_filename = patterns["latest_contours"].format(
         model=MODEL_NAME, param=param_config["id"]
     )
-    latest_binary_filename = latest_contour_filename.replace(".json", ".bin.gz")
-    master_contours["binary"]["file"] = latest_binary_filename
     with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
         json.dump(master_contours, f)
-    with open(os.path.join(output_dist_dir, latest_binary_filename), "wb") as f:
-        f.write(compressed_contours)
 
     chunks, frame_w, frame_h = build_volume_chunks(
         frame_arrays, 
