@@ -742,4 +742,4 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"❌ Error processing parameter '{param}': {e}")
 
-    print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")now let me know which file to edit next. also check vectorContours.js because I'm not sure if prate contours will be styled/work with dark mode/etc
+    print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")
