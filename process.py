@@ -128,9 +128,11 @@ def _pack_level(cont_gen, level):
 def _level_style(level, contours_config):
     """Name/color/width/opacity for a level (same rules as before, computed once per level)."""
     name = str(level)
+    unit = None
     for c_def in contours_config:
         # Formats integers cleanly for dam, mb, and hPa
         if c_def.get("dynamic") and c_def.get("unit") in {"dam", "mb", "hPa"}:
+            unit = c_def.get("unit")
             name = str(int(level)) if float(level).is_integer() else str(level)
             break
 
@@ -140,6 +142,7 @@ def _level_style(level, contours_config):
     )
     return {
         "name": name,
+        "unit": unit or match.get("unit", ""),
         "color": match.get("color", "#000000"),
         "width": match.get("width", 1.6),
         "opacity": match.get("opacity", 0.9),
@@ -270,6 +273,45 @@ def normalize_array(raw_arr, param_config):
         return arr.astype(np.uint8)
 
 
+def process_thickness_grib(grib_path, contour_config):
+    """
+    🌟 Computes 1000-500mb thickness in decameters (dam): (Z500 - Z1000) / 98.0665
+    """
+    ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
+
+    if 'lon' in ds.coords:
+        ds = ds.rename({'lon': 'longitude'})
+    if 'lat' in ds.coords:
+        ds = ds.rename({'lat': 'latitude'})
+
+    ds = ds.sortby('latitude', ascending=False)
+    if ds.longitude.max() > 180:
+        ds = ds.assign_coords(longitude=(((ds.longitude + 180) % 360) - 180)).sortby('longitude')
+
+    target_var = "z" if "z" in ds else list(ds.data_vars)[0]
+    da = ds[target_var]
+
+    # Find the pressure level coordinate (typically 'isobaricInhPa')
+    level_coord = next((c for c in da.coords if 'isobaric' in c.lower() or 'level' in c.lower()), None)
+
+    if level_coord:
+        z500 = da.sel({level_coord: 500}).values.squeeze()
+        z1000 = da.sel({level_coord: 1000}).values.squeeze()
+    else:
+        raw_vals = da.values
+        z500, z1000 = raw_vals[0].squeeze(), raw_vals[1].squeeze()
+
+    ds.close()
+
+    thickness_dam = (z500 - z1000) / 98.0665
+
+    return extract_contour_levels(
+        thickness_dam,
+        contour_config.get("contours", []),
+        contour_config.get("contours_settings")
+    )
+
+
 def process_grib_to_array(grib_path, param_config, want_raster=True):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
 
@@ -333,10 +375,17 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     try:
         client.retrieve(**retrieve_kwargs)
         if os.path.exists(grib_file):
-            contour_source = param_config.get("contour_source")
-            raster_config = {**param_config, "contours": []} if contour_source else param_config
+            # Support multiple contour sources (contour_sources) or legacy single (contour_source)
+            contour_sources = param_config.get("contour_sources")
+            if not contour_sources and param_config.get("contour_source"):
+                contour_sources = [param_config["contour_source"]]
+
+            has_contours = bool(contour_sources)
+            raster_config = {**param_config, "contours": []} if has_contours else param_config
             frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config)
+            contour_levels = list(contour_levels)
             ptype_arr = None
+
             try: os.remove(grib_file)
             except Exception: pass
 
@@ -362,37 +411,43 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                         try: os.remove(ptype_file)
                         except Exception: pass
 
-            if contour_source:
-                contour_param_name = contour_source.get("grib_param", "contour")
-                contour_grib_file = patterns["grib"].format(
-                    model=model_name,
-                    param=f"{param_config['id']}_{contour_param_name}",
-                    step=step
-                )
-                contour_retrieve_kwargs = dict(retrieve_kwargs)
-                contour_retrieve_kwargs.update({
-                    "param": [contour_source["grib_param"]],
-                    "levtype": contour_source.get("levtype", param_config.get("levtype", "pl")),
-                    "target": contour_grib_file
-                })
-                if "levelist" in contour_source:
-                    contour_retrieve_kwargs["levelist"] = contour_source["levelist"]
-                elif "levelist" in contour_retrieve_kwargs:
-                    del contour_retrieve_kwargs["levelist"]
+            # Retrieve and extract all contour sources (e.g. MSLP + 1000-500mb Thickness)
+            if contour_sources:
+                for c_src in contour_sources:
+                    c_id = c_src.get("id", c_src.get("grib_param", "contour"))
+                    c_grib_file = patterns["grib"].format(
+                        model=model_name,
+                        param=f"{param_config['id']}_{c_id}",
+                        step=step
+                    )
+                    c_kwargs = dict(retrieve_kwargs)
+                    c_kwargs.update({
+                        "param": [c_src["grib_param"]],
+                        "levtype": c_src.get("levtype", "sfc"),
+                        "target": c_grib_file
+                    })
+                    if "levelist" in c_src:
+                        c_kwargs["levelist"] = c_src["levelist"]
+                    elif "levelist" in c_kwargs:
+                        del c_kwargs["levelist"]
 
-                try:
-                    client.retrieve(**contour_retrieve_kwargs)
-                    if os.path.exists(contour_grib_file):
-                        contour_param_config = {**param_config, **contour_source}
-                        _, contour_levels = process_grib_to_array(
-                            contour_grib_file, contour_param_config, want_raster=False
-                        )
-                except Exception as e:
-                    print(f"  ❌ [{param_config['id']}] Contour error F{step:03d}: {e}")
-                finally:
-                    if os.path.exists(contour_grib_file):
-                        try: os.remove(contour_grib_file)
-                        except Exception: pass
+                    try:
+                        client.retrieve(**c_kwargs)
+                        if os.path.exists(c_grib_file):
+                            if c_src.get("type") == "thickness":
+                                levels = process_thickness_grib(c_grib_file, c_src)
+                            else:
+                                c_cfg = {**param_config, **c_src}
+                                _, levels = process_grib_to_array(
+                                    c_grib_file, c_cfg, want_raster=False
+                                )
+                            contour_levels.extend(levels)
+                    except Exception as e:
+                        print(f"  ❌ [{param_config['id']}] Contour error ({c_id}) F{step:03d}: {e}")
+                    finally:
+                        if os.path.exists(c_grib_file):
+                            try: os.remove(c_grib_file)
+                            except Exception: pass
 
             # Pack contour bytes here, in the worker thread, so the end of the pipeline
             # only has to concatenate.
