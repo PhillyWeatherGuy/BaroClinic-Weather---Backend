@@ -129,7 +129,8 @@ def _level_style(level, contours_config):
     """Name/color/width/opacity for a level (same rules as before, computed once per level)."""
     name = str(level)
     for c_def in contours_config:
-        if c_def.get("dynamic") and c_def.get("unit") == "dam":
+        # Formats integers cleanly for dam, mb, and hPa
+        if c_def.get("dynamic") and c_def.get("unit") in {"dam", "mb", "hPa"}:
             name = str(int(level)) if float(level).is_integer() else str(level)
             break
 
@@ -294,8 +295,11 @@ def process_grib_to_array(grib_path, param_config, want_raster=True):
     if param_config.get("category_mode"):
         return np.nan_to_num(raw_arr_k, nan=0.0).clip(0, 255).astype(np.uint8), []
 
+    # 🌟 Unit Conversions for Contouring
     if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
         raw_arr_k = raw_arr_k / 98.0665
+    elif param_config.get("unit") in {"mb", "hPa"} or str(param_config.get("grib_param", "")).lower() in {"msl", "mslp"}:
+        raw_arr_k = raw_arr_k / 100.0
 
     contour_levels = extract_contour_levels(
         raw_arr_k,
@@ -303,7 +307,7 @@ def process_grib_to_array(grib_path, param_config, want_raster=True):
         param_config.get("contours_settings")
     )
 
-    # Contour-only GRIBs (e.g. z500 lines over a pva raster) skip the 8-bit conversion.
+    # Contour-only GRIBs (e.g. z500 or msl isobars) skip 8-bit image conversion
     arr_8bit = normalize_array(raw_arr_k, param_config) if want_raster else None
 
     return arr_8bit, contour_levels
@@ -359,9 +363,10 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                         except Exception: pass
 
             if contour_source:
+                contour_param_name = contour_source.get("grib_param", "contour")
                 contour_grib_file = patterns["grib"].format(
                     model=model_name,
-                    param=f"{param_config['id']}_z500",
+                    param=f"{param_config['id']}_{contour_param_name}",
                     step=step
                 )
                 contour_retrieve_kwargs = dict(retrieve_kwargs)
@@ -372,6 +377,8 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                 })
                 if "levelist" in contour_source:
                     contour_retrieve_kwargs["levelist"] = contour_source["levelist"]
+                elif "levelist" in contour_retrieve_kwargs:
+                    del contour_retrieve_kwargs["levelist"]
 
                 try:
                     client.retrieve(**contour_retrieve_kwargs)
@@ -381,7 +388,7 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                             contour_grib_file, contour_param_config, want_raster=False
                         )
                 except Exception as e:
-                    print(f"  ❌ [{param_config['id']}] Height contour error F{step:03d}: {e}")
+                    print(f"  ❌ [{param_config['id']}] Contour error F{step:03d}: {e}")
                 finally:
                     if os.path.exists(contour_grib_file):
                         try: os.remove(contour_grib_file)
@@ -735,4 +742,4 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"❌ Error processing parameter '{param}': {e}")
 
-    print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")
+    print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")now let me know which file to edit next. also check vectorContours.js because I'm not sure if prate contours will be styled/work with dark mode/etc
