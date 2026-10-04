@@ -72,7 +72,28 @@
         "val_points": [0.0, 0.1, 1.0, 2.5],
         "byte_points": [0, 100, 200, 255]
       },
-      "contours": [],
+      "contour_source": {
+        "grib_param": "msl",
+        "levtype": "sfc",
+        "unit": "mb"
+      },
+      "contours_settings": {
+        "blur_kernel": [5, 5],
+        "blur_sigma": 1.2,
+        "coarsen_stride": 2
+      },
+      "contours": [
+        {
+          "id": "mslp_2mb",
+          "name": "MSLP",
+          "color": "#000000",
+          "width": 1.4,
+          "opacity": 0.85,
+          "interval": 2.0,
+          "dynamic": true,
+          "unit": "mb"
+        }
+      ],
       "filename_patterns": {
         "grib": "{model}_{param}_{step:03d}.grib2",
         "volume": "{model}_{param}_{date}_{run}z_volume_{chunk_idx}.bin",
