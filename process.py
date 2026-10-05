@@ -35,6 +35,8 @@ CONTOUR_COORD_SCALE = 1000          # stored as integer thousandths of a degree
 CONTOUR_FORMAT = "CTV2"
 INT16_MAX = 32767
 
+CLIMATOLOGY_CACHE = {}
+
 
 def load_parameter_config(param_key="2t"):
     """
@@ -261,7 +263,7 @@ def normalize_array(raw_arr, param_config):
         return np.interp(v, val_pts, byte_pts).astype(np.uint8)
 
     else:
-        # Standard Linear Scaling (Temperature, Wind, Pressure, etc.)
+        # Standard Linear Scaling (Temperature, Wind, Pressure, Anomaly, etc.)
         min_v = scaling.get("min_val", param_config.get("min_val", 0.0))
         max_v = scaling.get("max_val", param_config.get("max_val", 255.0))
 
@@ -271,6 +273,66 @@ def normalize_array(raw_arr, param_config):
         arr /= (max_v - min_v)
         arr *= 255.0
         return arr.astype(np.uint8)
+
+
+def get_climatology_grid(param_id, target_date=None, target_shape=(721, 1440), unit="m"):
+    """
+    🌟 Loads 30-year climatology baseline grid (Option 1).
+    Looks in 'climatology/' or 'config/climatology/' for NetCDF (.nc) or NumPy (.npy/.npz).
+    Caches in memory across threads. Falls back to zonal-mean if no file is found yet.
+    """
+    month = int(target_date[4:6]) if target_date and len(target_date) >= 6 else 10
+    cache_key = f"{param_id}_{month}_{unit}"
+    if cache_key in CLIMATOLOGY_CACHE:
+        return CLIMATOLOGY_CACHE[cache_key]
+
+    clim_dir = os.path.join("config", "climatology")
+    if not os.path.exists(clim_dir):
+        clim_dir = "climatology"
+
+    candidate_files = [
+        os.path.join(clim_dir, "z500_clim.nc"),
+        os.path.join(clim_dir, "era5_z500_climatology.nc"),
+        os.path.join(clim_dir, "z500_climatology.nc"),
+        os.path.join(clim_dir, f"z500_clim_{month:02d}.npy"),
+        os.path.join(clim_dir, "z500_clim.npy"),
+        os.path.join(clim_dir, "z500_clim.npz"),
+    ]
+
+    for c_path in candidate_files:
+        if os.path.exists(c_path):
+            try:
+                if c_path.endswith(".nc"):
+                    with xr.open_dataset(c_path) as ds:
+                        var = next((v for v in ["z", "gh", "z500", "hgt"] if v in ds), list(ds.data_vars)[0])
+                        da = ds[var]
+                        if "month" in da.coords:
+                            da = da.sel(month=month)
+                        grid = np.squeeze(da.values).astype(np.float32)
+                elif c_path.endswith(".npz"):
+                    with np.load(c_path) as data:
+                        grid = data[f"month_{month:02d}"] if f"month_{month:02d}" in data else data[list(data.keys())[0]]
+                elif c_path.endswith(".npy"):
+                    grid = np.load(c_path).astype(np.float32)
+
+                # Resize if climatology grid resolution differs from IFS 0.25 (721x1440)
+                if grid.shape != target_shape:
+                    grid = cv2.resize(grid, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_LINEAR)
+
+                # Convert geopotential to height if in m^2/s^2 (> 20000)
+                if np.nanmean(grid) > 20000.0:
+                    scale = 98.0665 if unit == "dam" else 9.80665
+                    grid /= scale
+                elif unit == "dam" and np.nanmean(grid) > 1000.0:
+                    grid /= 10.0
+
+                CLIMATOLOGY_CACHE[cache_key] = grid
+                print(f"  📖 Loaded 30-year climatology baseline from: {c_path}")
+                return grid
+            except Exception as e:
+                print(f"  ⚠️ Error loading climatology file {c_path}: {e}")
+
+    return None
 
 
 def process_thickness_grib(grib_path, contour_config):
@@ -312,7 +374,7 @@ def process_thickness_grib(grib_path, contour_config):
     )
 
 
-def process_grib_to_array(grib_path, param_config, want_raster=True):
+def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
 
     if 'lon' in ds.coords:
@@ -337,8 +399,21 @@ def process_grib_to_array(grib_path, param_config, want_raster=True):
     if param_config.get("category_mode"):
         return np.nan_to_num(raw_arr_k, nan=0.0).clip(0, 255).astype(np.uint8), []
 
+    # 🌟 500mb Height Anomaly Calculation (Option 1: Z500 - Climatology)
+    if "anom" in param_config.get("id", "").lower() or param_config.get("is_anomaly"):
+        target_unit = param_config.get("unit", "m").lower()
+        scale_div = 98.0665 if target_unit in {"dam"} else 9.80665
+        hgt = raw_arr_k / scale_div
+
+        clim = get_climatology_grid(param_config["id"], target_date, hgt.shape, unit=target_unit)
+        if clim is None:
+            # Graceful fallback: zonal-mean baseline until a climatology file is placed
+            clim = np.tile(np.nanmean(hgt, axis=1, keepdims=True), (1, hgt.shape[1]))
+
+        raw_arr_k = hgt - clim
+
     # 🌟 Unit Conversions for Contouring
-    if param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
+    elif param_config.get("unit") == "dam" or str(param_config.get("grib_param", "")).lower() in {"z", "gh", "hgt"}:
         raw_arr_k = raw_arr_k / 98.0665
     elif param_config.get("unit") in {"mb", "hPa"} or str(param_config.get("grib_param", "")).lower() in {"msl", "mslp"}:
         raw_arr_k = raw_arr_k / 100.0
@@ -382,7 +457,7 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
 
             has_contours = bool(contour_sources)
             raster_config = {**param_config, "contours": []} if has_contours else param_config
-            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config)
+            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config, target_date=target_date)
             contour_levels = list(contour_levels)
             ptype_arr = None
 
@@ -439,7 +514,7 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                             else:
                                 c_cfg = {**param_config, **c_src}
                                 _, levels = process_grib_to_array(
-                                    c_grib_file, c_cfg, want_raster=False
+                                    c_grib_file, c_cfg, want_raster=False, target_date=target_date
                                 )
                             contour_levels.extend(levels)
                     except Exception as e:
