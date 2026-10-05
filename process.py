@@ -588,6 +588,11 @@ def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, t
 
 
 def upload_single_file(s3_client, bucket_name, filepath, filename):
+    # 🌟 Guard against uploading empty or corrupt files (< 100 bytes)
+    if os.path.getsize(filepath) < 100:
+        print(f"  ⚠️ Skipping empty file (< 100 bytes): {filename}")
+        return
+
     if filename.endswith(".json"):
         content_type = "application/json"
     elif filename.endswith(".gz"):
@@ -713,53 +718,56 @@ def run_master_pipeline(selected_param_key="2t"):
         print(f"❌ [{param_config['id']}] No frames processed. Exiting pipeline.")
         return
 
-    # --- Contours: one dated binary + JSON metadata (the "latest" JSON points at the dated binary)
-    contour_binary = assemble_contour_file(contour_steps)
+    # --- Contours: only package & write if valid contours were extracted
+    if contour_steps and "run_contours" in patterns:
+        contour_binary = assemble_contour_file(contour_steps)
+        compressed_contours = gzip.compress(contour_binary, compresslevel=6)
 
-    master_contours = {
-        "model": MODEL_NAME,
-        "parameter": param_config["id"],
-        "run": f"{CHOSEN_RUN}z",
-        "date": target_date,
-        "steps": {
-            str(step): {
-                "type": "FeatureCollection",
-                "features": [
-                    {
-                        "type": "Feature",
-                        "geometry": {"type": "MultiLineString", "coordinates": []},
-                        "properties": props,
+        if len(compressed_contours) >= 100:
+            master_contours = {
+                "model": MODEL_NAME,
+                "parameter": param_config["id"],
+                "run": f"{CHOSEN_RUN}z",
+                "date": target_date,
+                "steps": {
+                    str(step): {
+                        "type": "FeatureCollection",
+                        "features": [
+                            {
+                                "type": "Feature",
+                                "geometry": {"type": "MultiLineString", "coordinates": []},
+                                "properties": props,
+                            }
+                            for props in contour_steps[step]["props"]
+                        ],
                     }
-                    for props in contour_steps[step]["props"]
-                ],
+                    for step in sorted(contour_steps)
+                },
             }
-            for step in sorted(contour_steps)
-        },
-    }
 
-    run_contour_filename = patterns["run_contours"].format(
-        model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
-    )
-    run_binary_filename = run_contour_filename.replace(".json", ".bin.gz")
-    master_contours["binary"] = {
-        "format": CONTOUR_FORMAT,
-        "scale": CONTOUR_COORD_SCALE,
-        "file": run_binary_filename,
-    }
+            run_contour_filename = patterns["run_contours"].format(
+                model=MODEL_NAME, param=param_config["id"], date=target_date, run=CHOSEN_RUN.lower()
+            )
+            run_binary_filename = run_contour_filename.replace(".json", ".bin.gz")
+            master_contours["binary"] = {
+                "format": CONTOUR_FORMAT,
+                "scale": CONTOUR_COORD_SCALE,
+                "file": run_binary_filename,
+            }
 
-    compressed_contours = gzip.compress(contour_binary, compresslevel=6)
-    print(f"  📦 [{param_config['id']}] Contours: {len(contour_binary)/1e6:.2f} MB raw -> {len(compressed_contours)/1e6:.2f} MB gzip")
+            print(f"  📦 [{param_config['id']}] Contours: {len(contour_binary)/1e6:.2f} MB raw -> {len(compressed_contours)/1e6:.2f} MB gzip")
 
-    with open(os.path.join(output_dist_dir, run_contour_filename), 'w') as f:
-        json.dump(master_contours, f, separators=(",", ":"))
-    with open(os.path.join(output_dist_dir, run_binary_filename), "wb") as f:
-        f.write(compressed_contours)
+            with open(os.path.join(output_dist_dir, run_contour_filename), 'w') as f:
+                json.dump(master_contours, f, separators=(",", ":"))
+            with open(os.path.join(output_dist_dir, run_binary_filename), "wb") as f:
+                f.write(compressed_contours)
 
-    latest_contour_filename = patterns["latest_contours"].format(
-        model=MODEL_NAME, param=param_config["id"]
-    )
-    with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
-        json.dump(master_contours, f, separators=(",", ":"))
+            if "latest_contours" in patterns:
+                latest_contour_filename = patterns["latest_contours"].format(
+                    model=MODEL_NAME, param=param_config["id"]
+                )
+                with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
+                    json.dump(master_contours, f, separators=(",", ":"))
 
     # --- Raster volume chunks
     chunks, frame_w, frame_h = build_volume_chunks(
