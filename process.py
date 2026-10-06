@@ -5,6 +5,7 @@ import glob
 import json
 import math
 import sys
+import re
 import concurrent.futures
 import numpy as np
 import xarray as xr
@@ -637,8 +638,6 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         if os.path.isfile(os.path.join(folder_path, fname))
     ]
 
-    # Binaries first, then every .json (manifests and the "latest" contour pointer),
-    # so a pointer never goes live before the file it references.
     asset_files = [f for f in all_files if not f.endswith('.json')]
     json_files = [f for f in all_files if f.endswith('.json')]
 
@@ -676,6 +675,49 @@ def upload_to_huggingface(folder_path, repo_id="PhillyWeatherGuy/baroclinic-mode
         print(f"  ✅ Uploaded to Hugging Face: {folder_path}")
     except Exception as e:
         print(f"  ❌ Failed to upload to Hugging Face: {e}")
+
+
+def prune_old_huggingface_runs(repo_id="PhillyWeatherGuy/baroclinic-model-data", days_to_keep=3):
+    """
+    🌟 Automatically prunes dated files older than `days_to_keep` days from Hugging Face.
+    Leaves un-dated master pointers (manifest.json, latest contours) completely intact.
+    """
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        return
+
+    cutoff_date = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_to_keep)
+    cutoff_int = int(cutoff_date.strftime("%Y%m%d"))
+
+    print(f"\n🧹 Checking for Hugging Face runs older than {cutoff_date.strftime('%Y-%m-%d')} (>{days_to_keep} days)...")
+
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+        all_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+        files_to_delete = []
+
+        for fname in all_files:
+            # Matches 8-digit date pattern: e.g. _20261005_
+            match = re.search(r'_(\d{8})_', fname)
+            if match:
+                file_date_int = int(match.group(1))
+                if file_date_int < cutoff_int:
+                    files_to_delete.append(fname)
+
+        if files_to_delete:
+            print(f"  🗑️ Deleting {len(files_to_delete)} expired files older than {days_to_keep} days...")
+            api.delete_files(
+                repo_id=repo_id,
+                repo_type="dataset",
+                paths=files_to_delete,
+                commit_message=f"Prune runs older than {days_to_keep} days"
+            )
+            print("  ✅ Pruning complete!")
+        else:
+            print("  ✨ No expired files found.")
+    except Exception as e:
+        print(f"  ⚠️ Could not prune old Hugging Face files: {e}")
 
 
 def run_master_pipeline(selected_param_key="2t"):
@@ -739,7 +781,6 @@ def run_master_pipeline(selected_param_key="2t"):
         print(f"❌ [{param_config['id']}] No frames processed. Exiting pipeline.")
         return
 
-    # --- Contours: only package & write if valid contours were extracted
     if contour_steps and "run_contours" in patterns:
         contour_binary = assemble_contour_file(contour_steps)
         compressed_contours = gzip.compress(contour_binary, compresslevel=6)
@@ -790,7 +831,6 @@ def run_master_pipeline(selected_param_key="2t"):
                 with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
                     json.dump(master_contours, f, separators=(",", ":"))
 
-    # --- Raster volume chunks
     chunks, frame_w, frame_h = build_volume_chunks(
         frame_arrays,
         steps_written,
@@ -807,7 +847,6 @@ def run_master_pipeline(selected_param_key="2t"):
         filename = chunk["manifest_data"]["file"]
         filepath = os.path.join(output_dist_dir, filename)
 
-        # 🌟 Writes Gzip-compressed raw binary buffer
         if filename.endswith(".bin"):
             with open(filepath, "wb") as f:
                 f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=9))
@@ -903,3 +942,4 @@ if __name__ == "__main__":
                     print(f"❌ Error processing parameter '{param}': {e}")
 
     print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")
+    prune_old_huggingface_runs(days_to_keep=3)
