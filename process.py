@@ -638,6 +638,8 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         if os.path.isfile(os.path.join(folder_path, fname))
     ]
 
+    # Binaries first, then every .json (manifests and the "latest" contour pointer),
+    # so a pointer never goes live before the file it references.
     asset_files = [f for f in all_files if not f.endswith('.json')]
     json_files = [f for f in all_files if f.endswith('.json')]
 
@@ -716,6 +718,21 @@ def prune_old_huggingface_runs(repo_id="PhillyWeatherGuy/baroclinic-model-data",
             print("  ✅ Pruning complete!")
         else:
             print("  ✨ No expired files found.")
+
+        # 🌟 Automated Weekly Maintenance: Every Sunday on the 00Z run, squash Git history to 1 commit
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        if now_utc.weekday() == 6 and now_utc.hour < 6:
+            try:
+                print("\n🧼 Sunday Maintenance: Automatically squashing Git history to 1 commit...")
+                api.super_squash_history(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    commit_message="Automated weekly history reset"
+                )
+                print("  🎉 Git history squashed! Old blobs purged.")
+            except Exception as e:
+                print(f"  ⚠️ Weekly squash skipped: {e}")
+
     except Exception as e:
         print(f"  ⚠️ Could not prune old Hugging Face files: {e}")
 
