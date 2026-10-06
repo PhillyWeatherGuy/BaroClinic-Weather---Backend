@@ -657,6 +657,27 @@ def upload_to_b2_parallel(folder_path, bucket_name="baroclinic-weather-data"):
         concurrent.futures.wait(futures)
 
 
+def upload_to_huggingface(folder_path, repo_id="PhillyWeatherGuy/baroclinic-model-data"):
+    hf_token = os.environ.get("HF_TOKEN")
+    if not hf_token:
+        print("⚠️ HF_TOKEN not set in environment. Skipping Hugging Face upload.")
+        return
+
+    print(f"\n🤗 Uploading {folder_path} assets to Hugging Face ({repo_id})...")
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+        api.upload_folder(
+            folder_path=folder_path,
+            repo_id=repo_id,
+            repo_type="dataset",
+            commit_message=f"Upload model grids: {folder_path}"
+        )
+        print(f"  ✅ Uploaded to Hugging Face: {folder_path}")
+    except Exception as e:
+        print(f"  ❌ Failed to upload to Hugging Face: {e}")
+
+
 def run_master_pipeline(selected_param_key="2t"):
     MODEL_NAME = "ecmwf"
     param_config = load_parameter_config(selected_param_key)
@@ -839,6 +860,7 @@ def run_master_pipeline(selected_param_key="2t"):
 
     print(f"\n🎉 [{param_config['id']}] Assets ready in {output_dist_dir}/")
 
+    upload_to_huggingface(output_dist_dir)
     upload_to_b2_parallel(output_dist_dir)
 
     try:
