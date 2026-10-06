@@ -30,12 +30,13 @@ jobs:
     - name: Install Python Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install numpy xarray pillow cfgrib ecmwf-opendata rioxarray boto3 opencv-python-headless matplotlib zstandard netCDF4
+        pip install numpy xarray pillow cfgrib ecmwf-opendata rioxarray boto3 opencv-python-headless matplotlib zstandard netCDF4 huggingface_hub
 
-    - name: Run Weather Data Texture Pipeline & Upload to B2
+    - name: Run Weather Data Texture Pipeline & Upload
       env:
         B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
         B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
         B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
       run: |
         python process.py
