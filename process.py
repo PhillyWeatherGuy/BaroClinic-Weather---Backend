@@ -861,7 +861,7 @@ def run_master_pipeline(selected_param_key="2t"):
     print(f"\n🎉 [{param_config['id']}] Assets ready in {output_dist_dir}/")
 
     upload_to_huggingface(output_dist_dir)
-    upload_to_b2_parallel(output_dist_dir)
+    # upload_to_b2_parallel(output_dist_dir)
 
     try:
         shutil.rmtree(output_dist_dir)
