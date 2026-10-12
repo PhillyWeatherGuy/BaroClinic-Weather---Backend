@@ -249,7 +249,7 @@
     "w250": {
       "id": "w250",
       "name": "250mb Wind & Height",
-      "grib_param": "ws",
+      "grib_param": ["u", "v"],
       "levtype": "pl",
       "levelist": 250,
       "type": "fc",
