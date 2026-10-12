@@ -699,7 +699,7 @@ def prune_old_huggingface_runs(repo_id="PhillyWeatherGuy/baroclinic-model-data",
     print(f"\n🧹 Checking for Hugging Face runs older than {cutoff_date.strftime('%Y-%m-%d')} (>{days_to_keep} days)...")
 
     try:
-        from huggingface_hub import HfApi
+        from huggingface_hub import HfApi, CommitOperationDelete
         api = HfApi(token=hf_token)
         all_files = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
         files_to_delete = []
@@ -714,12 +714,16 @@ def prune_old_huggingface_runs(repo_id="PhillyWeatherGuy/baroclinic-model-data",
 
         if files_to_delete:
             print(f"  🗑️ Deleting {len(files_to_delete)} expired files older than {days_to_keep} days...")
-            api.delete_files(
-                repo_id=repo_id,
-                repo_type="dataset",
-                paths=files_to_delete,
-                commit_message=f"Prune runs older than {days_to_keep} days"
-            )
+            batch_size = 200
+            for i in range(0, len(files_to_delete), batch_size):
+                batch = files_to_delete[i:i + batch_size]
+                operations = [CommitOperationDelete(path_in_repo=f) for f in batch]
+                api.create_commit(
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    operations=operations,
+                    commit_message=f"Prune runs older than {days_to_keep} days ({i + len(batch)}/{len(files_to_delete)})"
+                )
             print("  ✅ Pruning complete!")
         else:
             print("  ✨ No expired files found.")
