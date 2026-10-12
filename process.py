@@ -390,11 +390,15 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
             longitude=(((ds.longitude + 180) % 360) - 180)
         ).sortby('longitude')
 
+    # 🌟 Wind Speed: if both u and v components are present, calculate magnitude sqrt(u^2 + v^2)
     grib_var = param_config["grib_param"]
-    target_var = grib_var if grib_var in ds else list(ds.data_vars)[0]
-    data_array = ds[target_var]
+    if "u" in ds and "v" in ds:
+        raw_arr_k = np.hypot(np.squeeze(ds["u"].values), np.squeeze(ds["v"].values))
+    else:
+        target_var = grib_var if (isinstance(grib_var, str) and grib_var in ds) else list(ds.data_vars)[0]
+        data_array = ds[target_var]
+        raw_arr_k = np.squeeze(data_array.values)
 
-    raw_arr_k = np.squeeze(data_array.values)
     ds.close()
 
     if param_config.get("category_mode"):
@@ -435,13 +439,14 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     patterns = param_config["filename_patterns"]
     grib_file = patterns["grib"].format(model=model_name, param=param_config["id"], step=step)
 
+    grib_p = param_config["grib_param"]
     retrieve_kwargs = {
         "date": target_date,
         "time": int(chosen_run),
         "step": step,
         "type": param_config.get("type", "fc"),
         "levtype": param_config.get("levtype", "sfc"),
-        "param": [param_config["grib_param"]],
+        "param": grib_p if isinstance(grib_p, list) else [grib_p],
         "target": grib_file
     }
 
