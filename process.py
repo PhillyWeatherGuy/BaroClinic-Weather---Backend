@@ -32,7 +32,14 @@ FORECAST_STEPS = list(range(0, 145, 3)) + list(range(150, 361, 6))
 
 MAX_TEXTURE_SIZE = 4096
 
-MAX_CONCURRENT_WORKERS = 4
+# Downloads are latency-bound (~0.4-1.0s each), so more threads than cores helps.
+# Override without a code change via the MAX_WORKERS env var if Azure ever throttles.
+MAX_CONCURRENT_WORKERS = int(os.environ.get("MAX_WORKERS", "12"))
+
+# Volume gzip: level 6 is far faster than 9 for nearly the same size; chunks are
+# compressed in parallel (zlib releases the GIL).
+GZIP_LEVEL = 6
+GZIP_THREADS = 4
 
 MAX_CONCURRENT_PARAMS = 2
 
@@ -72,6 +79,11 @@ def timed(key):
                 return fn(*a, **k)
         return wrapper
     return deco
+
+
+def _gzip_to_file(path, raw_bytes):
+    with open(path, "wb") as f:
+        f.write(gzip.compress(raw_bytes, compresslevel=GZIP_LEVEL))
 
 
 def _print_timing(pid, phases, total):
@@ -929,23 +941,31 @@ def run_master_pipeline(selected_param_key="2t"):
 
     manifest_chunks = []
 
-    for chunk in chunks:
-        filename = chunk["manifest_data"]["file"]
-        filepath = os.path.join(output_dist_dir, filename)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=GZIP_THREADS) as gz_pool:
+        gz_futures = []
+        for chunk in chunks:
+            filename = chunk["manifest_data"]["file"]
+            filepath = os.path.join(output_dist_dir, filename)
 
-        if filename.endswith(".bin"):
-            with open(filepath, "wb") as f:
-                f.write(gzip.compress(chunk["array"].tobytes(), compresslevel=9))
-            ptype_filename = chunk["manifest_data"].get("ptype_file")
-            if ptype_filename and "ptype_array" in chunk:
-                with open(os.path.join(output_dist_dir, ptype_filename), "wb") as ptype_file:
-                    ptype_file.write(gzip.compress(chunk["ptype_array"].tobytes(), compresslevel=9))
-        elif filename.endswith(".webp"):
-            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
-        else:
-            cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
+            if filename.endswith(".bin"):
+                gz_futures.append(gz_pool.submit(_gzip_to_file, filepath, chunk["array"].tobytes()))
+                ptype_filename = chunk["manifest_data"].get("ptype_file")
+                if ptype_filename and "ptype_array" in chunk:
+                    gz_futures.append(gz_pool.submit(
+                        _gzip_to_file,
+                        os.path.join(output_dist_dir, ptype_filename),
+                        chunk["ptype_array"].tobytes(),
+                    ))
+            elif filename.endswith(".webp"):
+                cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_WEBP_QUALITY), 101])
+            else:
+                cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
 
-        manifest_chunks.append(chunk["manifest_data"])
+            manifest_chunks.append(chunk["manifest_data"])
+
+        # Re-raise any compression/write error here, exactly as the old serial loop would have.
+        for fut in gz_futures:
+            fut.result()
     phases["volumes+gzip"] = time.perf_counter() - t0
 
     manifest = {
