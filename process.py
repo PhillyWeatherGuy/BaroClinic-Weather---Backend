@@ -6,6 +6,10 @@ import json
 import math
 import sys
 import re
+import time
+import threading
+import contextlib
+import functools
 import concurrent.futures
 import numpy as np
 import xarray as xr
@@ -19,6 +23,8 @@ import gzip
 import struct
 
 os.environ["GDAL_NUM_THREADS"] = "ALL_CPUS"
+os.environ.setdefault("TQDM_DISABLE", "1")   # silence download progress bars (best effort)
+sys.stdout.reconfigure(line_buffering=True)  # so log timestamps match reality
 
 # ECMWF open data (0p25 IFS): 3-hourly to 144h, then 6-hourly to 360h.
 # Requesting anything else (e.g. 147, 153, ...) just returns a 404.
@@ -37,6 +43,41 @@ CONTOUR_FORMAT = "CTV2"
 INT16_MAX = 32767
 
 CLIMATOLOGY_CACHE = {}
+
+# ---------------------------------------------------------------------------
+# Timing instrumentation (no behavior change)
+# ---------------------------------------------------------------------------
+TIMINGS = {}
+_T_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def tm(key):
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        dt = time.perf_counter() - t0
+        with _T_LOCK:
+            t = TIMINGS.setdefault(key, [0.0, 0])
+            t[0] += dt
+            t[1] += 1
+
+
+def timed(key):
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            with tm(key):
+                return fn(*a, **k)
+        return wrapper
+    return deco
+
+
+def _print_timing(pid, phases, total):
+    ph = " | ".join(f"{k} {v:.1f}s" for k, v in phases.items())
+    work = " | ".join(f"{k} {v[0]:.1f}s/{v[1]}x" for k, v in sorted(TIMINGS.items()))
+    print(f"⏱️ [{pid}] total {total:.1f}s || phases: {ph} || thread-summed: {work}", flush=True)
 
 
 def load_parameter_config(param_key="2t"):
@@ -152,6 +193,7 @@ def _level_style(level, contours_config):
     }
 
 
+@timed("contour_math")
 def extract_contour_levels(raw_arr_k, contours_config=None, contour_settings=None):
     """
     Returns a list of {"props": {...}, "payload": bytes}, one per contour level that has lines.
@@ -228,6 +270,7 @@ def extract_contour_levels(raw_arr_k, contours_config=None, contour_settings=Non
         return []
 
 
+@timed("pack")
 def pack_step(levels):
     """Concatenate one step's level payloads (runs inside the worker thread)."""
     return {
@@ -336,6 +379,7 @@ def get_climatology_grid(param_id, target_date=None, target_shape=(721, 1440), u
     return None
 
 
+@timed("decode_all")
 def process_thickness_grib(grib_path, contour_config):
     """
     🌟 Computes 1000-500mb thickness in decameters (dam): (Z500 - Z1000) / 98.0665
@@ -375,6 +419,7 @@ def process_thickness_grib(grib_path, contour_config):
     )
 
 
+@timed("decode_all")
 def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
 
@@ -454,7 +499,8 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
         retrieve_kwargs["levelist"] = param_config["levelist"]
 
     try:
-        client.retrieve(**retrieve_kwargs)
+        with tm("download"):
+            client.retrieve(**retrieve_kwargs)
         if os.path.exists(grib_file):
             # Support multiple contour sources (contour_sources) or legacy single (contour_source)
             contour_sources = param_config.get("contour_sources")
@@ -481,7 +527,8 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                     "target": ptype_file,
                 })
                 try:
-                    client.retrieve(**ptype_retrieve_kwargs)
+                    with tm("download_ptype"):
+                        client.retrieve(**ptype_retrieve_kwargs)
                     if os.path.exists(ptype_file):
                         ptype_config = {**ptype_source, "category_mode": True}
                         ptype_arr, _ = process_grib_to_array(ptype_file, ptype_config)
@@ -513,7 +560,8 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
                         del c_kwargs["levelist"]
 
                     try:
-                        client.retrieve(**c_kwargs)
+                        with tm("download_contour"):
+                            client.retrieve(**c_kwargs)
                         if os.path.exists(c_grib_file):
                             if c_src.get("type") == "thickness":
                                 levels = process_thickness_grib(c_grib_file, c_src)
@@ -544,6 +592,7 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
     return step, None, None, None
 
 
+@timed("stack")
 def build_volume_chunks(frame_arrays, steps_written, model_name, param_config, target_date, chosen_run, ptype_arrays=None):
     """
     🌟 Builds contiguous 3D binary time-volume chunks [T, H, W]
@@ -753,6 +802,10 @@ def run_master_pipeline(selected_param_key="2t"):
 
     output_dist_dir = f"run_{param_config['id']}"
 
+    TIMINGS.clear()
+    t_total = time.perf_counter()
+    phases = {}
+
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     current_hour = now_utc.hour
 
@@ -780,6 +833,7 @@ def run_master_pipeline(selected_param_key="2t"):
     client = Client(source="azure", model="ifs", resol="0p25")
     os.makedirs(output_dist_dir, exist_ok=True)
 
+    t0 = time.perf_counter()
     results = {}
     contour_steps = {}
     ptype_results = {}
@@ -798,6 +852,9 @@ def run_master_pipeline(selected_param_key="2t"):
                 if ptype_arr is not None:
                     ptype_results[step] = ptype_arr
 
+    phases["fetch_phase"] = time.perf_counter() - t0
+    print(f"[{param_config['id']}] steps ok: {len(results)}/{len(FORECAST_STEPS)}", flush=True)
+
     sorted_steps = sorted(results.keys())
     frame_arrays = [results[s] for s in sorted_steps]
     ptype_arrays = [ptype_results.get(s) for s in sorted_steps]
@@ -807,6 +864,7 @@ def run_master_pipeline(selected_param_key="2t"):
         print(f"❌ [{param_config['id']}] No frames processed. Exiting pipeline.")
         return
 
+    t0 = time.perf_counter()
     if contour_steps and "run_contours" in patterns:
         contour_binary = assemble_contour_file(contour_steps)
         compressed_contours = gzip.compress(contour_binary, compresslevel=6)
@@ -856,7 +914,9 @@ def run_master_pipeline(selected_param_key="2t"):
                 )
                 with open(os.path.join(output_dist_dir, latest_contour_filename), 'w') as f:
                     json.dump(master_contours, f, separators=(",", ":"))
+    phases["contour_file"] = time.perf_counter() - t0
 
+    t0 = time.perf_counter()
     chunks, frame_w, frame_h = build_volume_chunks(
         frame_arrays,
         steps_written,
@@ -886,6 +946,7 @@ def run_master_pipeline(selected_param_key="2t"):
             cv2.imwrite(filepath, chunk["array"], [int(cv2.IMWRITE_PNG_COMPRESSION), 6])
 
         manifest_chunks.append(chunk["manifest_data"])
+    phases["volumes+gzip"] = time.perf_counter() - t0
 
     manifest = {
         "model": MODEL_NAME,
@@ -925,7 +986,9 @@ def run_master_pipeline(selected_param_key="2t"):
 
     print(f"\n🎉 [{param_config['id']}] Assets ready in {output_dist_dir}/")
 
+    t0 = time.perf_counter()
     upload_to_huggingface(output_dist_dir)
+    phases["hf_upload"] = time.perf_counter() - t0
     # upload_to_b2_parallel(output_dist_dir)
 
     try:
@@ -933,6 +996,8 @@ def run_master_pipeline(selected_param_key="2t"):
         print(f"  ✅ [{param_config['id']}] Cleanup complete.")
     except Exception as e:
         print(f"  ❌ [{param_config['id']}] Failed to delete temp directory: {e}")
+
+    _print_timing(param_config["id"], phases, time.perf_counter() - t_total)
 
 
 if __name__ == "__main__":
@@ -949,11 +1014,13 @@ if __name__ == "__main__":
     print(f"🚀 Launching Pipeline for Parameters: {target_params}")
 
     batch_size = MAX_CONCURRENT_PARAMS
+    t_run = time.perf_counter()
 
     for i in range(0, len(target_params), batch_size):
         batch = target_params[i:i + batch_size]
         batch_num = (i // batch_size) + 1
         total_batches = math.ceil(len(target_params) / batch_size)
+        t_batch = time.perf_counter()
 
         print(f"\n📦 [Batch {batch_num}/{total_batches}] Running {len(batch)} parameter(s) concurrently: {batch}")
 
@@ -967,5 +1034,9 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"❌ Error processing parameter '{param}': {e}")
 
+        print(f"⏱️ Batch {batch_num}/{total_batches} took {time.perf_counter() - t_batch:.1f}s", flush=True)
+
     print("\n🎉 ALL PARAMETERS COMPLETED SUCCESSFULLY!")
+    t_p = time.perf_counter()
     prune_old_huggingface_runs(days_to_keep=3)
+    print(f"⏱️ prune {time.perf_counter() - t_p:.1f}s | pipeline total {time.perf_counter() - t_run:.1f}s", flush=True)
