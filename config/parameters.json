@@ -27,7 +27,7 @@
     "cape": {
       "id": "cape",
       "name": "Surface-Based CAPE",
-      "grib_param": "cape",
+      "grib_param": "mucape",
       "levtype": "sfc",
       "type": "fc",
       "unit": "J/Kg",
