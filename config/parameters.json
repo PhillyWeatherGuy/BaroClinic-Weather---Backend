@@ -1,5 +1,6 @@
 {
-  "asnow_6h": {
+  "parameters": {
+    "asnow_6h": {
       "id": "asnow_6h",
       "name": "6-Hour Accumulated Snowfall",
       "grib_param": "sf",
@@ -94,8 +95,7 @@
         "run_manifest": "{model}_{param}_{date}_{run}z_manifest.json",
         "latest_manifest": "{model}_{param}_manifest.json"
       }
-    }
-  "parameters": {
+    },
     "2t": {
       "id": "2t",
       "name": "2m Temperature",
