@@ -432,7 +432,7 @@ def process_thickness_grib(grib_path, contour_config):
 
 
 @timed("decode_all")
-def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None):
+def process_grib_to_array(grib_path, param_config, want_raster=True, target_date=None, want_raw=False):
     ds = xr.open_dataset(grib_path, engine="cfgrib", backend_kwargs={'errors': 'ignore'})
 
     if 'lon' in ds.coords:
@@ -486,6 +486,9 @@ def process_grib_to_array(grib_path, param_config, want_raster=True, target_date
         param_config.get("contours_settings")
     )
 
+    if want_raw:
+        return np.nan_to_num(raw_arr_k, nan=0.0).astype(np.float32), contour_levels
+
     # Contour-only GRIBs (e.g. z500 or msl isobars) skip 8-bit image conversion
     arr_8bit = normalize_array(raw_arr_k, param_config) if want_raster else None
 
@@ -521,7 +524,8 @@ def fetch_and_process_step(client, target_date, chosen_run, step, param_config, 
 
             has_contours = bool(contour_sources)
             raster_config = {**param_config, "contours": []} if has_contours else param_config
-            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config, target_date=target_date)
+            is_interval = bool(param_config.get("interval_hours") or re.search(r'[-_]?(6|24)h(?:r)?$', param_config.get("id", "").lower()))
+            frame_arr, contour_levels = process_grib_to_array(grib_file, raster_config, target_date=target_date, want_raw=is_interval)
             contour_levels = list(contour_levels)
             ptype_arr = None
 
@@ -868,6 +872,29 @@ def run_master_pipeline(selected_param_key="2t"):
     print(f"[{param_config['id']}] steps ok: {len(results)}/{len(FORECAST_STEPS)}", flush=True)
 
     sorted_steps = sorted(results.keys())
+
+    # 🌟 Interval Accumulation Differencing (e.g. 6h / 24h Snowfall or Precipitation)
+    interval_h = param_config.get("interval_hours")
+    if not interval_h:
+        match = re.search(r'[-_]?(6|24)h(?:r)?$', param_config.get("id", "").lower())
+        if match:
+            interval_h = int(match.group(1))
+
+    if interval_h:
+        diff_results = {}
+        for s in sorted_steps:
+            target_prev = s - interval_h
+            if target_prev <= 0:
+                prev_arr = results.get(0, 0.0)
+            else:
+                candidates = [st for st in sorted_steps if st <= target_prev]
+                prev_s = max(candidates) if candidates else None
+                prev_arr = results[prev_s] if prev_s is not None else 0.0
+
+            diff = np.maximum(0.0, results[s] - prev_arr)
+            diff_results[s] = normalize_array(diff, param_config)
+        results = diff_results
+
     frame_arrays = [results[s] for s in sorted_steps]
     ptype_arrays = [ptype_results.get(s) for s in sorted_steps]
     steps_written = sorted_steps
