@@ -1,12 +1,26 @@
 name: Generate Weather Maps
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && format('ECMWF {0} {1}z', inputs.date, inputs.run) || 'ECMWF build' }}
+
 on:
   push:
     branches:
       - main
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      date:
+        description: 'Run date, YYYYMMDD (leave blank for the latest run)'
+        required: false
+        type: string
+      run:
+        description: 'Run hour, 00/06/12/18 (leave blank for the latest run)'
+        required: false
+        type: string
+
+# One job per run, so different runs never wait on each other
+concurrency:
+  group: ecmwf-${{ inputs.date || 'auto' }}-${{ inputs.run || 'auto' }}
+  cancel-in-progress: false
 
 jobs:
   build-and-plot:
@@ -38,5 +52,11 @@ jobs:
         B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
         B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        RUN_DATE: ${{ inputs.date }}
+        RUN_HOUR: ${{ inputs.run }}
       run: |
-        python process.py
+        if [ -n "$RUN_DATE" ] && [ -n "$RUN_HOUR" ]; then
+          python process.py --date "$RUN_DATE" --run "$RUN_HOUR"
+        else
+          python process.py
+        fi
