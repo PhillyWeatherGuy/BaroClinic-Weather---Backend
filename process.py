@@ -811,7 +811,7 @@ def prune_old_huggingface_runs(repo_id="PhillyWeatherGuy/baroclinic-model-data",
         print(f"  ⚠️ Could not prune old Hugging Face files: {e}")
 
 
-def run_master_pipeline(selected_param_key="2t"):
+def run_master_pipeline(selected_param_key="2t", custom_run=None, custom_date=None):
     MODEL_NAME = "ecmwf"
     param_config = load_parameter_config(selected_param_key)
     patterns = param_config["filename_patterns"]
@@ -825,7 +825,9 @@ def run_master_pipeline(selected_param_key="2t"):
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     current_hour = now_utc.hour
 
-    if current_hour >= 20:
+    if custom_run and custom_date:
+        CHOSEN_RUN, target_date = str(custom_run).zfill(2), str(custom_date)
+    elif current_hour >= 20:
         CHOSEN_RUN, target_date = "12", now_utc.strftime("%Y%m%d")
     elif current_hour >= 14:
         CHOSEN_RUN, target_date = "06", now_utc.strftime("%Y%m%d")
@@ -1048,9 +1050,24 @@ def run_master_pipeline(selected_param_key="2t"):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        target_params = sys.argv[1:]
-    else:
+    target_params = []
+    custom_run = None
+    custom_date = None
+
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--run" and i + 1 < len(args):
+            custom_run = args[i + 1]
+            i += 2
+        elif args[i] == "--date" and i + 1 < len(args):
+            custom_date = args[i + 1]
+            i += 2
+        else:
+            target_params.append(args[i])
+            i += 1
+
+    if not target_params:
         if os.path.exists(CONFIG_FILE_PATH):
             with open(CONFIG_FILE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -1072,7 +1089,7 @@ if __name__ == "__main__":
         print(f"\n📦 [Batch {batch_num}/{total_batches}] Running {len(batch)} parameter(s) concurrently: {batch}")
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=len(batch)) as executor:
-            futures = {executor.submit(run_master_pipeline, param): param for param in batch}
+            futures = {executor.submit(run_master_pipeline, param, custom_run, custom_date): param for param in batch}
             for future in concurrent.futures.as_completed(futures):
                 param = futures[future]
                 try:
